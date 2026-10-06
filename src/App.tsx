@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile } from './types';
 import { dataStore } from './lib/dataStore';
+import { ADMIN_PROFILE_ID } from './lib/constants';
 import { Navbar } from './components/Navbar';
 import { UserDashboard } from './components/user/UserDashboard';
 import { AdminDashboard } from './components/admin/AdminDashboard';
@@ -38,13 +39,16 @@ export default function App() {
     }
   };
 
-  const handleAdminPasswordSuccess = () => {
+  const handleAdminPasswordSuccess = async () => {
     setIsAdminUnlocked(true);
     setShowAdminPwModal(false);
 
+    // Pull the latest admin + user profiles from Supabase before opening the dashboard
+    await dataStore.syncWithSupabase();
+
     // Primary admin session
     const adminProfile = dataStore.getProfiles().find(p => p.role === 'admin') || {
-      id: 'user-admin-master',
+      id: ADMIN_PROFILE_ID,
       name: 'Administrator',
       email: 'admin@vi-outreach.com',
       role: 'admin' as const,
