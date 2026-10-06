@@ -8,7 +8,7 @@ import {
   AuditLog,
   AllocationResult,
 } from '../types';
-import { DEF_FMT, INITIAL_PROFILES } from './constants';
+import { DEF_FMT, INITIAL_PROFILES, ADMIN_PROFILE_ID, LEGACY_ADMIN_PROFILE_ID } from './constants';
 import { getSupabaseClient } from './supabaseClient';
 
 const STORAGE_KEYS = {
@@ -21,6 +21,21 @@ const STORAGE_KEYS = {
   AUDIT: 'vi_audit_v3',
   ACTIVE_USER_ID: 'vi_active_user_id_v3',
 };
+
+function newUuid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
+function dbErrorText(err: { message?: string; code?: string } | null | undefined): string {
+  if (!err) return 'Unknown database error.';
+  return `${err.message || 'Database error'}${err.code ? ` (code ${err.code})` : ''}`;
+}
 
 class DataStore {
   private profiles: UserProfile[] = [];
@@ -54,7 +69,11 @@ class DataStore {
       const storedProfiles = localStorage.getItem(STORAGE_KEYS.PROFILES);
       if (storedProfiles) {
         const parsed = JSON.parse(storedProfiles);
-        const cleaned = parsed.filter(
+        const cleaned = parsed
+          .map((p: UserProfile) =>
+            p.id === LEGACY_ADMIN_PROFILE_ID ? { ...p, id: ADMIN_PROFILE_ID } : p
+          )
+          .filter(
           (p: UserProfile) =>
             !['ramesh@vi-outreach.com', 'priya@vi-outreach.com', 'ricky@vi-outreach.com'].includes(
               p.email
@@ -111,7 +130,8 @@ class DataStore {
       const storedAudit = localStorage.getItem(STORAGE_KEYS.AUDIT);
       this.auditLogs = storedAudit ? JSON.parse(storedAudit) : [];
 
-      const activeId = localStorage.getItem(STORAGE_KEYS.ACTIVE_USER_ID);
+      let activeId = localStorage.getItem(STORAGE_KEYS.ACTIVE_USER_ID);
+      if (activeId === LEGACY_ADMIN_PROFILE_ID) activeId = ADMIN_PROFILE_ID;
       this.activeUser = activeId ? this.profiles.find(p => p.id === activeId) || null : null;
 
       this.persistAll();
@@ -129,21 +149,30 @@ class DataStore {
 
     this.isSyncing = true;
     try {
-      // 1. Fetch remote profiles
+      // 1. Profiles: Supabase is the source of truth (admin + users)
+      await this.ensureAdminProfile(client);
+
       const { data: remoteProfiles, error: pErr } = await client
         .from('profiles')
-        .select('*');
+        .select('*')
+        .order('created_at', { ascending: true });
 
-      if (!pErr && remoteProfiles && remoteProfiles.length > 0) {
-        // Merge profiles keeping master admin
-        const masterAdmin = this.profiles.find(p => p.role === 'admin') || INITIAL_PROFILES[0];
-        const merged = [masterAdmin];
-        for (const rp of remoteProfiles) {
-          if (!merged.some(m => m.id === rp.id || m.email === rp.email)) {
-            merged.push(rp);
+      if (pErr) {
+        console.error('Supabase profiles fetch failed:', dbErrorText(pErr));
+      } else if (remoteProfiles && remoteProfiles.length > 0) {
+        this.profiles = remoteProfiles as UserProfile[];
+
+        // Keep the logged-in session aligned with the database copy
+        if (this.activeUser) {
+          const fresh = this.profiles.find(p => p.id === this.activeUser!.id);
+          if (fresh && fresh.status === 'active') {
+            this.activeUser = fresh;
+          } else if (!fresh && this.activeUser.role === 'user') {
+            this.activeUser = null;
+          } else if (fresh && fresh.status !== 'active') {
+            this.activeUser = null;
           }
         }
-        this.profiles = merged;
       }
 
       // 2. Fetch remote customers
@@ -182,6 +211,20 @@ class DataStore {
       console.warn('Supabase sync skipped/failed:', err);
     } finally {
       this.isSyncing = false;
+    }
+  }
+
+  // Make sure the master admin row exists in Supabase (insert-only, never overwrites edits)
+  private async ensureAdminProfile(client: NonNullable<ReturnType<typeof getSupabaseClient>>) {
+    try {
+      const { error } = await client
+        .from('profiles')
+        .upsert([INITIAL_PROFILES[0]], { onConflict: 'email', ignoreDuplicates: true });
+      if (error) {
+        console.error('Supabase admin profile save failed:', dbErrorText(error));
+      }
+    } catch (err) {
+      console.error('Supabase admin profile save error:', err);
     }
   }
 
@@ -246,38 +289,56 @@ class DataStore {
 
     const client = getSupabaseClient();
     if (client) {
-      try {
-        const { data: dbUser, error } = await client
-          .from('profiles')
-          .select('*')
-          .or(`email.ilike.${clean},name.ilike.${clean}`)
-          .maybeSingle();
+      // Supabase is configured: it is the only source for agent logins (no local fallback)
+      const safe = clean.replace(/[,()%*\\]/g, '');
+      const { data: rows, error } = await client
+        .from('profiles')
+        .select('*')
+        .or(`email.ilike.${safe},email.ilike.${safe}@*,name.ilike.${safe}`)
+        .limit(20);
 
-        if (!error && dbUser) {
-          if (dbUser.status !== 'active') {
-            return {
-              success: false,
-              error: 'Your account is currently disabled. Please contact Administrator.',
-            };
-          }
-
-          // Cache in local profiles
-          const existingIdx = this.profiles.findIndex(p => p.id === dbUser.id);
-          if (existingIdx !== -1) {
-            this.profiles[existingIdx] = dbUser;
-          } else {
-            this.profiles.push(dbUser);
-          }
-
-          this.activeUser = dbUser;
-          localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, dbUser.id);
-          this.addAuditLog(dbUser.id, dbUser.name, 'USER_LOGIN', `Agent ${dbUser.name} logged in via Supabase`);
-          this.persistAll();
-          return { success: true, user: dbUser };
-        }
-      } catch (err) {
-        console.warn('Supabase profile login error, falling back to local store:', err);
+      if (error) {
+        console.error('Supabase login lookup failed:', dbErrorText(error));
+        return {
+          success: false,
+          error: `Supabase se connect nahi ho paya: ${dbErrorText(error)}`,
+        };
       }
+
+      const dbUser = (rows || []).find(
+        (p: UserProfile) =>
+          p.role === 'user' &&
+          (p.email.toLowerCase() === clean ||
+            p.name.toLowerCase() === clean ||
+            p.email.split('@')[0].toLowerCase() === clean)
+      ) as UserProfile | undefined;
+
+      if (!dbUser) {
+        return {
+          success: false,
+          error: 'Agent account not found. Please contact Administrator to create your login.',
+        };
+      }
+
+      if (dbUser.status !== 'active') {
+        return {
+          success: false,
+          error: 'Your account is currently disabled. Please contact Administrator.',
+        };
+      }
+
+      const existingIdx = this.profiles.findIndex(p => p.id === dbUser.id);
+      if (existingIdx !== -1) {
+        this.profiles[existingIdx] = dbUser;
+      } else {
+        this.profiles.push(dbUser);
+      }
+
+      this.activeUser = dbUser;
+      localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, dbUser.id);
+      this.addAuditLog(dbUser.id, dbUser.name, 'USER_LOGIN', `Agent ${dbUser.name} logged in via Supabase`);
+      this.persistAll();
+      return { success: true, user: dbUser };
     }
 
     // Fallback to local profile check
@@ -340,10 +401,19 @@ class DataStore {
 
     const client = getSupabaseClient();
     if (client) {
-      try {
-        await client.from('profiles').delete().eq('id', userId);
-      } catch (err) {
-        console.warn('Supabase delete profile error:', err);
+      const { data: deleted, error } = await client
+        .from('profiles')
+        .delete()
+        .eq('id', userId)
+        .select();
+      if (error) {
+        return { success: false, error: `Supabase delete failed: ${dbErrorText(error)}` };
+      }
+      if (!deleted || deleted.length === 0) {
+        return {
+          success: false,
+          error: 'Supabase ne koi row delete nahi ki (RLS policy ya id mismatch check karein).',
+        };
       }
     }
 
@@ -363,70 +433,92 @@ class DataStore {
     return { success: true };
   }
 
-  // Create User with Supabase insert
+  // Create User: saved in Supabase when configured (no silent local-only fallback)
   public async createProfile(
     data: Omit<UserProfile, 'id' | 'created_at' | 'updated_at'>
-  ): Promise<UserProfile> {
+  ): Promise<{ success: boolean; error?: string; profile?: UserProfile }> {
+    const email = data.email.trim();
+    const name = data.name.trim();
+
+    if (this.profiles.some(p => p.email.toLowerCase() === email.toLowerCase())) {
+      return { success: false, error: `User with email ${email} already exists.` };
+    }
+
     const newProfile: UserProfile = {
       ...data,
-      id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name,
+      email,
+      id: newUuid(),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
 
     const client = getSupabaseClient();
     if (client) {
-      try {
-        const { data: inserted, error } = await client
-          .from('profiles')
-          .insert([newProfile])
-          .select()
-          .single();
+      const { data: inserted, error } = await client
+        .from('profiles')
+        .insert([newProfile])
+        .select()
+        .single();
 
-        if (!error && inserted) {
-          this.profiles.push(inserted as UserProfile);
-          this.addAuditLog(
-            this.activeUser?.id || 'admin',
-            this.activeUser?.name || 'Admin',
-            'CREATE_USER',
-            `Created user ${inserted.name} (${inserted.email}) in Supabase`
-          );
-          this.persistAll();
-          return inserted as UserProfile;
-        }
-      } catch (err) {
-        console.warn('Supabase insert profile error:', err);
+      if (error || !inserted) {
+        console.error('Supabase insert profile failed:', dbErrorText(error));
+        return { success: false, error: `Supabase save failed: ${dbErrorText(error)}` };
       }
+
+      this.profiles.push(inserted as UserProfile);
+      this.addAuditLog(
+        this.activeUser?.id || ADMIN_PROFILE_ID,
+        this.activeUser?.name || 'Admin',
+        'CREATE_USER',
+        `Created user ${inserted.name} (${inserted.email}) in Supabase`
+      );
+      this.persistAll();
+      return { success: true, profile: inserted as UserProfile };
     }
 
+    // Supabase not configured: built-in local mode
     this.profiles.push(newProfile);
     this.addAuditLog(
-      this.activeUser?.id || 'admin',
+      this.activeUser?.id || ADMIN_PROFILE_ID,
       this.activeUser?.name || 'Admin',
       'CREATE_USER',
       `Created user ${newProfile.name} (${newProfile.email})`
     );
     this.persistAll();
-    return newProfile;
+    return { success: true, profile: newProfile };
   }
 
   // Update User with Supabase update
-  public async updateProfile(id: string, updates: Partial<UserProfile>): Promise<UserProfile | null> {
+  public async updateProfile(
+    id: string,
+    updates: Partial<UserProfile>
+  ): Promise<{ success: boolean; error?: string; profile?: UserProfile }> {
     const idx = this.profiles.findIndex(p => p.id === id);
-    if (idx === -1) return null;
+    if (idx === -1) return { success: false, error: 'User not found.' };
 
+    const updatedAt = new Date().toISOString();
     const updated = {
       ...this.profiles[idx],
       ...updates,
-      updated_at: new Date().toISOString(),
+      updated_at: updatedAt,
     };
 
     const client = getSupabaseClient();
     if (client) {
-      try {
-        await client.from('profiles').update(updates).eq('id', id);
-      } catch (err) {
-        console.warn('Supabase update profile error:', err);
+      const { data: rows, error } = await client
+        .from('profiles')
+        .update({ ...updates, updated_at: updatedAt })
+        .eq('id', id)
+        .select();
+      if (error) {
+        return { success: false, error: `Supabase update failed: ${dbErrorText(error)}` };
+      }
+      if (!rows || rows.length === 0) {
+        return {
+          success: false,
+          error: 'Supabase ne koi row update nahi ki (RLS policy ya id mismatch check karein).',
+        };
       }
     }
 
@@ -435,13 +527,13 @@ class DataStore {
       this.activeUser = updated;
     }
     this.addAuditLog(
-      this.activeUser?.id || 'admin',
+      this.activeUser?.id || ADMIN_PROFILE_ID,
       this.activeUser?.name || 'Admin',
       'UPDATE_USER',
       `Updated user ${updated.name} limits or status`
     );
     this.persistAll();
-    return updated;
+    return { success: true, profile: updated };
   }
 
   // --- QUOTA & USER PULL STATS ---

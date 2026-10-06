@@ -19,10 +19,14 @@ Vi aapke liye ek Matching Premium Number ZERO Price par laaya hai ✨
 📞 8377919293 
 👉 https://wa.me/918377919293?text=Yes`;
 
+// Fixed UUID so the master admin can live in the Supabase `profiles` table (id is a UUID column)
+export const ADMIN_PROFILE_ID = '00000000-0000-0000-0000-000000000001';
+export const LEGACY_ADMIN_PROFILE_ID = 'user-admin-master';
+
 // Master Admin system profile (no demo agents)
 export const INITIAL_PROFILES: UserProfile[] = [
   {
-    id: 'user-admin-master',
+    id: ADMIN_PROFILE_ID,
     name: 'Administrator',
     email: 'admin@vi-outreach.com',
     role: 'admin',
