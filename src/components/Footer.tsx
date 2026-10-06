@@ -22,21 +22,21 @@ export const Footer: React.FC<FooterProps> = ({ onAdminAccessGranted }) => {
         </span>
       </div>
 
-      <div className="flex flex-wrap items-center justify-center gap-1.5 mb-4">
-        <span className="px-2.5 py-1 rounded text-[10px] bg-white/5 border border-[var(--rim)] text-[var(--txt3)]">
+      <div className="flex flex-wrap items-center justify-center gap-1 mb-3">
+        <span className="px-2 py-0.5 rounded-md text-[9px] font-mono bg-white/5 border border-[var(--rim)] text-[var(--txt3)]">
           WhatsApp Ready
         </span>
-        <span className="px-2.5 py-1 rounded text-[10px] bg-white/5 border border-[var(--rim)] text-[var(--txt3)]">
+        <span className="px-2 py-0.5 rounded-md text-[9px] font-mono bg-white/5 border border-[var(--rim)] text-[var(--txt3)]">
           RCS Enabled
         </span>
-        <span className="px-2.5 py-1 rounded text-[10px] bg-white/5 border border-[var(--rim)] text-[var(--txt3)]">
+        <span className="px-2 py-0.5 rounded-md text-[9px] font-mono bg-white/5 border border-[var(--rim)] text-[var(--txt3)]">
           CPOS Compatible
         </span>
-        <span className="px-2.5 py-1 rounded text-[10px] bg-white/5 border border-[var(--rim)] text-[var(--txt3)]">
+        <span className="px-2 py-0.5 rounded-md text-[9px] font-mono bg-white/5 border border-[var(--rim)] text-[var(--txt3)]">
           Bulk Processing
         </span>
-        <span className="px-2.5 py-1 rounded text-[10px] bg-white/5 border border-[var(--rim)] text-[var(--txt3)]">
-          Atomic Supabase Allocation
+        <span className="px-2 py-0.5 rounded-md text-[9px] font-mono bg-white/5 border border-[var(--rim)] text-[var(--txt3)]">
+          Atomic Database Allocation
         </span>
       </div>
 

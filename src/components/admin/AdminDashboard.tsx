@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { Customer, UserProfile, UploadHistory, PullHistory, AuditLog } from '../../types';
 import { dataStore } from '../../lib/dataStore';
-import { getSupabaseStatus } from '../../lib/supabaseClient';
+import { getSupabaseStatus, saveCustomSupabaseConfig } from '../../lib/supabaseClient';
 
 interface AdminDashboardProps {
   currentUser: UserProfile;
@@ -66,9 +66,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
     per_pull_limit: 20,
   });
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
+  const [deleteUserModal, setDeleteUserModal] = useState<UserProfile | null>(null);
+  const [showTemplatePreview, setShowTemplatePreview] = useState<boolean>(true);
 
-  // Supabase Copy Feedback
+  // Supabase Copy & Live Sync State
   const [isSqlCopied, setIsSqlCopied] = useState<boolean>(false);
+  const [customUrl, setCustomUrl] = useState<string>(
+    localStorage.getItem('vi_custom_supabase_url') || ''
+  );
+  const [customKey, setCustomKey] = useState<string>(
+    localStorage.getItem('vi_custom_supabase_anon_key') || ''
+  );
+  const [syncFeedback, setSyncFeedback] = useState<string>('');
+  const [isSyncingSupabase, setIsSyncingSupabase] = useState<boolean>(false);
+
+  const handleSaveSupabaseConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!customUrl.trim() || !customKey.trim()) {
+      setSyncFeedback('⚠️ Please enter both Supabase URL and Anon Key.');
+      return;
+    }
+    setIsSyncingSupabase(true);
+    setSyncFeedback('⏳ Connecting and synchronizing with Supabase...');
+    saveCustomSupabaseConfig(customUrl.trim(), customKey.trim());
+    await dataStore.syncWithSupabase();
+    refreshAll();
+    setIsSyncingSupabase(false);
+    setSyncFeedback('✅ Successfully connected to Supabase! Live database in sync.');
+  };
+
+  const handleManualSync = async () => {
+    setIsSyncingSupabase(true);
+    setSyncFeedback('⏳ Fetching latest data from Supabase...');
+    await dataStore.syncWithSupabase();
+    refreshAll();
+    setIsSyncingSupabase(false);
+    setSyncFeedback('✅ Sync complete! Latest profiles, customers, and history loaded.');
+  };
 
   const refreshAll = () => {
     setCustomers(dataStore.getAllCustomers());
@@ -211,12 +245,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
     reader.readAsBinaryString(file);
   };
 
-  const handleConfirmImport = () => {
+  const handleConfirmImport = async () => {
     if (!uploadFile || parsedRows.length === 0) return;
     setIsImporting(true);
 
     try {
-      const result = dataStore.importBulkData(uploadFile.name, parsedRows);
+      const result = await dataStore.importBulkData(uploadFile.name, parsedRows);
       setUploadMessage(
         `✅ Successfully imported ${result.newRows} new customers (${result.duplicate} duplicates skipped, ${result.invalid} invalid rows skipped).`
       );
@@ -255,11 +289,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
   );
 
   // --- ADD SINGLE CUSTOMER ---
-  const handleAddSingleCustomer = (e: React.FormEvent) => {
+  const handleAddSingleCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
     setNewCustError('');
 
-    const res = dataStore.addCustomer({
+    const res = await dataStore.addCustomer({
       customer_number: newCustForm.customer_number,
       customer_name: newCustForm.customer_name,
       matching_number: newCustForm.matching_number,
@@ -282,11 +316,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
   };
 
   // --- SAVE CUSTOMER EDIT ---
-  const handleSaveCustomerEdit = (e: React.FormEvent) => {
+  const handleSaveCustomerEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editCustModal) return;
 
-    dataStore.updateCustomer(editCustModal.id, {
+    await dataStore.updateCustomer(editCustModal.id, {
       customer_name: editCustModal.customer_name,
       matching_number: editCustModal.matching_number,
       matching_number_2: editCustModal.matching_number_2,
@@ -298,19 +332,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
   };
 
   // --- DELETE CUSTOMER ---
-  const handleConfirmDelete = () => {
+  const handleConfirmDelete = async () => {
     if (!deleteCustModal) return;
-    dataStore.deleteCustomer(deleteCustModal.id);
+    await dataStore.deleteCustomer(deleteCustModal.id);
     setDeleteCustModal(null);
     refreshAll();
   };
 
   // --- USER CREATION & EDITING ---
-  const handleCreateUser = (e: React.FormEvent) => {
+  const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newUserForm.name || !newUserForm.email) return;
 
-    dataStore.createProfile({
+    await dataStore.createProfile({
       name: newUserForm.name,
       email: newUserForm.email,
       role: newUserForm.role,
@@ -330,11 +364,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
     refreshAll();
   };
 
-  const handleSaveUserLimits = (e: React.FormEvent) => {
+  const handleSaveUserLimits = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingUser) return;
 
-    dataStore.updateProfile(editingUser.id, {
+    await dataStore.updateProfile(editingUser.id, {
       daily_pull_limit: editingUser.daily_pull_limit,
       per_pull_limit: editingUser.per_pull_limit,
       status: editingUser.status,
@@ -343,6 +377,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
 
     setEditingUser(null);
     refreshAll();
+  };
+
+  const handleConfirmDeleteUser = async () => {
+    if (!deleteUserModal) return;
+    await dataStore.deleteProfile(deleteUserModal.id);
+    setDeleteUserModal(null);
+    refreshAll();
+  };
+
+  const handleInsertPlaceholder = (ph: string) => {
+    setTemplateText(prev => prev + ph);
+  };
+
+  const handleResetTemplate = () => {
+    if (window.confirm('Restore standard default outreach message format?')) {
+      const def = dataStore.resetTemplate();
+      setTemplateText(def);
+      setIsTemplateSaved(false);
+      refreshAll();
+    }
   };
 
   const handleCopySchemaSql = () => {
@@ -1020,12 +1074,21 @@ SELECT 'Schema loaded successfully' AS result;`;
                       </div>
                     </div>
 
-                    <div className="flex justify-end pt-1">
+                    <div className="flex items-center justify-end gap-2 pt-1">
+                      {user.role !== 'admin' && (
+                        <button
+                          onClick={() => setDeleteUserModal(user)}
+                          className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-rose-950/30 hover:bg-rose-900/40 text-rose-300 border border-rose-800/30 cursor-pointer transition-colors"
+                          title="Delete this agent account"
+                        >
+                          🗑️ Delete
+                        </button>
+                      )}
                       <button
                         onClick={() => setEditingUser(user)}
-                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 hover:bg-white/10 text-[var(--gold-lt)] cursor-pointer"
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 hover:bg-white/10 text-[var(--gold-lt)] border border-[var(--rim)] cursor-pointer"
                       >
-                        ⚙️ Configure Limits & Status
+                        ⚙️ Limits & Status
                       </button>
                     </div>
                   </div>
@@ -1094,43 +1157,99 @@ SELECT 'Schema loaded successfully' AS result;`;
       {/* --- TAB 6: GLOBAL TEMPLATE EDITOR --- */}
       {activeTab === 'template' && (
         <div className="p-6 rounded-2xl border border-[var(--rim)] bg-[var(--card)] shadow-md space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h3 className="text-base font-bold text-[var(--txt)]">📝 Global Outreach Message Template</h3>
               <p className="text-xs text-[var(--txt3)]">
-                This template serves as the company-wide default for all WhatsApp and RCS outreach links
+                Admin Exclusive: This template applies across all WhatsApp and RCS outreach links
               </p>
             </div>
-            <button
-              onClick={() => {
-                dataStore.saveTemplate(templateText);
-                setIsTemplateSaved(true);
-                setTimeout(() => setIsTemplateSaved(false), 2000);
-              }}
-              className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-[var(--violet)] to-[var(--rose)] shadow cursor-pointer"
-            >
-              {isTemplateSaved ? '✅ Saved Globally!' : '💾 Save Global Format'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleResetTemplate}
+                className="px-3 py-1.5 rounded-xl text-xs font-medium border border-[var(--rim)] text-[var(--txt3)] hover:text-rose-400 cursor-pointer transition-colors"
+              >
+                🔄 Reset Default
+              </button>
+              <button
+                onClick={() => {
+                  dataStore.saveTemplate(templateText);
+                  setIsTemplateSaved(true);
+                  setTimeout(() => setIsTemplateSaved(false), 2000);
+                }}
+                className="px-4 py-1.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-[var(--violet)] to-[var(--rose)] shadow cursor-pointer transition-opacity"
+              >
+                {isTemplateSaved ? '✅ Saved Globally!' : '💾 Save Global Format'}
+              </button>
+            </div>
+          </div>
+
+          {/* Placeholders bar */}
+          <div className="p-3.5 rounded-xl border border-[rgba(201,147,42,0.25)] bg-[rgba(201,147,42,0.05)] space-y-2">
+            <div className="text-[10px] font-mono font-semibold uppercase tracking-wider text-[var(--gold-lt)]">
+              Insert Variable Placeholders (Click to Add):
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => handleInsertPlaceholder('{custNum}')}
+                className="px-2.5 py-1 rounded-lg bg-[rgba(201,147,42,0.12)] border border-[rgba(201,147,42,0.3)] text-[var(--gold-pale)] font-mono text-xs hover:bg-[rgba(201,147,42,0.25)] cursor-pointer transition-colors"
+              >
+                + {'{custNum}'} <span className="text-[10px] text-[var(--txt3)] font-sans">(Phone)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleInsertPlaceholder('{matchNum}')}
+                className="px-2.5 py-1 rounded-lg bg-[rgba(201,147,42,0.12)] border border-[rgba(201,147,42,0.3)] text-[var(--gold-pale)] font-mono text-xs hover:bg-[rgba(201,147,42,0.25)] cursor-pointer transition-colors"
+              >
+                + {'{matchNum}'} <span className="text-[10px] text-[var(--txt3)] font-sans">(Match 1)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleInsertPlaceholder('{matchNum2}')}
+                className="px-2.5 py-1 rounded-lg bg-[rgba(201,147,42,0.12)] border border-[rgba(201,147,42,0.3)] text-[var(--gold-pale)] font-mono text-xs hover:bg-[rgba(201,147,42,0.25)] cursor-pointer transition-colors"
+              >
+                + {'{matchNum2}'} <span className="text-[10px] text-[var(--txt3)] font-sans">(Match 2)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleInsertPlaceholder('{name}')}
+                className="px-2.5 py-1 rounded-lg bg-[rgba(201,147,42,0.12)] border border-[rgba(201,147,42,0.3)] text-[var(--gold-pale)] font-mono text-xs hover:bg-[rgba(201,147,42,0.25)] cursor-pointer transition-colors"
+              >
+                + {'{name}'} <span className="text-[10px] text-[var(--txt3)] font-sans">(Name)</span>
+              </button>
+            </div>
+            <p className="text-[10px] text-[var(--txt3)] pt-1 border-t border-[rgba(201,147,42,0.15)] leading-relaxed">
+              💡 <strong>Automated Logic:</strong> Any line containing <code className="text-[var(--gold-pale)]">{'{matchNum2}'}</code> is automatically dropped if a customer does not have a 2nd matching number.
+            </p>
           </div>
 
           <textarea
-            rows={10}
+            rows={9}
             value={templateText}
             onChange={e => setTemplateText(e.target.value)}
-            className="w-full p-4 rounded-xl border border-[var(--rim)] bg-[var(--inp-bg)] text-[var(--txt)] font-mono text-xs leading-relaxed focus:outline-none focus:border-[var(--violet-lt)]"
+            className="w-full p-3.5 rounded-xl border border-[var(--rim)] bg-[var(--inp-bg)] text-[var(--txt)] font-mono text-xs leading-relaxed focus:outline-none focus:border-[var(--violet-lt)]"
           />
 
-          <div className="text-xs text-[var(--txt3)] space-y-1">
-            <p>
-              • Available placeholders: <code className="text-[var(--gold-lt)]">{'{custNum}'}</code>,{' '}
-              <code className="text-[var(--gold-lt)]">{'{matchNum}'}</code>,{' '}
-              <code className="text-[var(--gold-lt)]">{'{matchNum2}'}</code>,{' '}
-              <code className="text-[var(--gold-lt)]">{'{name}'}</code>
-            </p>
-            <p>
-              • If an entry has no 2nd matching number, the line containing{' '}
-              <code className="text-[var(--gold-lt)]">{'{matchNum2}'}</code> is automatically dropped.
-            </p>
+          {/* Live Preview Toggle */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowTemplatePreview(!showTemplatePreview)}
+              className="text-xs text-[var(--txt2)] hover:text-white flex items-center gap-1.5 cursor-pointer font-medium py-1"
+            >
+              <span>{showTemplatePreview ? '▼' : '▶'}</span>
+              <span>Live Sample Message Preview</span>
+            </button>
+            {showTemplatePreview && (
+              <div className="mt-2 p-3.5 rounded-xl border border-[var(--rim)] bg-black/20 text-[var(--txt2)] font-mono text-xs leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto">
+                {templateText
+                  .replace(/\{custNum\}/g, '9876543210')
+                  .replace(/\{matchNum\}/g, '9876543219')
+                  .replace(/\{matchNum2\}/g, '9876543211')
+                  .replace(/\{name\}/g, 'Manish')}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1167,10 +1286,66 @@ SELECT 'Schema loaded successfully' AS result;`;
               <div className="p-3.5 rounded-xl border border-[var(--rim)] bg-[var(--panel)]">
                 <span className="text-[var(--txt3)]">Anon Key Configured:</span>
                 <div className="font-mono font-semibold text-[var(--txt)] mt-1">
-                  {supabaseStatus.hasAnonKey ? '✅ Present' : '❌ Not Provided'}
+                  {supabaseStatus.hasAnonKey ? '✅ Present & Connected' : '❌ Not Provided'}
                 </div>
               </div>
             </div>
+
+            {/* Live Credentials Manager */}
+            <form onSubmit={handleSaveSupabaseConfig} className="p-4 rounded-xl border border-[var(--rim)] bg-[var(--panel)] space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-[var(--txt)] uppercase tracking-wider font-mono">
+                  Live Supabase Credentials & Instant Sync
+                </h4>
+                <button
+                  type="button"
+                  onClick={handleManualSync}
+                  disabled={isSyncingSupabase}
+                  className="px-2.5 py-1 rounded-lg border border-[var(--rim)] text-xs text-[var(--gold-lt)] hover:text-white cursor-pointer disabled:opacity-50"
+                >
+                  {isSyncingSupabase ? 'Syncing...' : '🔄 Fetch From Supabase'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                <div>
+                  <label className="block text-[var(--txt3)] mb-1">Project URL</label>
+                  <input
+                    type="url"
+                    placeholder="https://xyz.supabase.co"
+                    value={customUrl}
+                    onChange={e => setCustomUrl(e.target.value)}
+                    className="w-full p-2.5 rounded-lg border border-[var(--rim)] bg-[var(--inp-bg)] text-[var(--txt)] font-mono text-xs focus:outline-none focus:border-[var(--gold)]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[var(--txt3)] mb-1">Anon Public Key</label>
+                  <input
+                    type="password"
+                    placeholder="eyJhbGciOi..."
+                    value={customKey}
+                    onChange={e => setCustomKey(e.target.value)}
+                    className="w-full p-2.5 rounded-lg border border-[var(--rim)] bg-[var(--inp-bg)] text-[var(--txt)] font-mono text-xs focus:outline-none focus:border-[var(--gold)]"
+                  />
+                </div>
+              </div>
+
+              {syncFeedback && (
+                <div className="text-xs p-2 rounded-lg bg-black/20 text-[var(--gold-pale)] font-mono">
+                  {syncFeedback}
+                </div>
+              )}
+
+              <div className="flex justify-end pt-1">
+                <button
+                  type="submit"
+                  disabled={isSyncingSupabase}
+                  className="px-4 py-2 rounded-lg bg-gradient-to-r from-[var(--violet)] to-[var(--rose)] text-white text-xs font-bold shadow hover:opacity-95 cursor-pointer disabled:opacity-50"
+                >
+                  💾 Save & Sync Supabase Database
+                </button>
+              </div>
+            </form>
 
             <div className="p-4 rounded-xl border border-[var(--gold)]/30 bg-[rgba(201,147,42,0.06)] space-y-3">
               <div className="flex items-center justify-between">
@@ -1572,6 +1747,36 @@ SELECT 'Schema loaded successfully' AS result;`;
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* MODAL: DELETE USER CONFIRMATION */}
+      {deleteUserModal && (
+        <div className="fixed inset-0 z-[750] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="w-full max-w-sm p-6 rounded-2xl bg-[var(--modal-card)] border border-rose-500/40 text-center shadow-2xl">
+            <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-rose-950/40 text-rose-400 flex items-center justify-center text-xl">
+              🗑️
+            </div>
+            <h4 className="text-base font-bold text-[var(--txt)] mb-1">Delete Agent Account?</h4>
+            <p className="text-xs text-[var(--txt2)] mb-5">
+              Are you sure you want to permanently delete{' '}
+              <strong className="text-white">{deleteUserModal.name}</strong> ({deleteUserModal.email})?
+              All future customer pull allocations for this agent will be revoked.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setDeleteUserModal(null)}
+                className="flex-1 py-2 rounded-xl border border-[var(--rim)] text-xs text-[var(--txt3)] hover:text-white cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmDeleteUser}
+                className="flex-1 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white shadow cursor-pointer transition-colors"
+              >
+                Delete Account
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -101,19 +101,19 @@ export const NumberCard: React.FC<NumberCardProps> = ({
         >
           {renderNumberDigits()}
         </div>
-        <div className="flex items-center gap-2 flex-wrap text-xs">
+        <div className="flex items-center gap-1.5 flex-wrap text-xs">
           {matches.length > 0 && (
-            <span className="font-mono text-[11px] text-[var(--txt3)] truncate">
+            <span className="font-mono text-[10px] text-[var(--txt3)] truncate">
               ↔ {matches.join(' & ')}
             </span>
           )}
           <span
-            className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wider uppercase border ${tagClass}`}
+            className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-medium tracking-normal border ${tagClass}`}
           >
             {tagLabel}
           </span>
           {customerName && (
-            <span className="text-[11px] text-[var(--violet-lt)] font-medium truncate">
+            <span className="text-[10px] text-[var(--violet-lt)] font-medium truncate">
               👤 {customerName}
             </span>
           )}
@@ -121,13 +121,13 @@ export const NumberCard: React.FC<NumberCardProps> = ({
       </div>
 
       {/* Action Buttons */}
-      <div className="flex items-center gap-1.5 shrink-0">
+      <div className="flex items-center gap-1 shrink-0">
         <a
           href={isEnteredNumber ? '#' : waUrl}
           target={isEnteredNumber ? undefined : '_blank'}
           rel="noopener noreferrer"
           onClick={handleWaClick}
-          className={`px-3 py-1.5 rounded-lg text-xs font-semibold text-white transition-opacity inline-flex items-center gap-1 ${
+          className={`px-2.5 py-1 rounded-md text-[11px] font-medium text-white transition-opacity inline-flex items-center gap-1 ${
             isSent
               ? 'bg-white/10 text-[var(--txt3)] cursor-default'
               : 'bg-[#1FAD54] hover:opacity-90 shadow-sm'
@@ -139,7 +139,7 @@ export const NumberCard: React.FC<NumberCardProps> = ({
         <a
           href={isEnteredNumber ? '#' : rcsUrl}
           onClick={handleRcsClick}
-          className={`px-3 py-1.5 rounded-lg text-xs font-semibold text-white transition-opacity inline-flex items-center gap-1 ${
+          className={`px-2.5 py-1 rounded-md text-[11px] font-medium text-white transition-opacity inline-flex items-center gap-1 ${
             isSent
               ? 'bg-white/10 text-[var(--txt3)] cursor-default'
               : 'bg-[#1667D9] hover:opacity-90 shadow-sm'

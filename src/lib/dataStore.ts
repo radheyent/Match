@@ -8,18 +8,18 @@ import {
   AuditLog,
   AllocationResult,
 } from '../types';
-import { DEF_FMT, INITIAL_PROFILES, INITIAL_CUSTOMERS } from './constants';
-import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { DEF_FMT, INITIAL_PROFILES } from './constants';
+import { getSupabaseClient } from './supabaseClient';
 
 const STORAGE_KEYS = {
-  PROFILES: 'vi_profiles_v2',
-  CUSTOMERS: 'vi_customers_v2',
-  PULL_HISTORY: 'vi_pull_history_v2',
-  SEND_HISTORY: 'vi_send_history_v2',
-  TEMPLATES: 'vi_templates_v2',
-  UPLOADS: 'vi_uploads_v2',
-  AUDIT: 'vi_audit_v2',
-  ACTIVE_USER_ID: 'vi_active_user_id_v2',
+  PROFILES: 'vi_profiles_v3',
+  CUSTOMERS: 'vi_customers_v3',
+  PULL_HISTORY: 'vi_pull_history_v3',
+  SEND_HISTORY: 'vi_send_history_v3',
+  TEMPLATES: 'vi_templates_v3',
+  UPLOADS: 'vi_uploads_v3',
+  AUDIT: 'vi_audit_v3',
+  ACTIVE_USER_ID: 'vi_active_user_id_v3',
 };
 
 class DataStore {
@@ -32,20 +32,58 @@ class DataStore {
   private auditLogs: AuditLog[] = [];
   private activeUser: UserProfile | null = null;
   private listeners: Set<() => void> = new Set();
-  // In-memory mutex lock to prevent concurrent allocation race conditions in JavaScript runtime
   private allocationLock: boolean = false;
+  private isSyncing: boolean = false;
 
   constructor() {
     this.init();
+    // Asynchronously sync with Supabase if configured
+    this.syncWithSupabase();
   }
 
   private init() {
     try {
-      const storedProfiles = localStorage.getItem(STORAGE_KEYS.PROFILES);
-      this.profiles = storedProfiles ? JSON.parse(storedProfiles) : [...INITIAL_PROFILES];
+      // 1. Purge legacy demo storage keys to guarantee 100% production clean start
+      try {
+        localStorage.removeItem('vi_customers_v2');
+        localStorage.removeItem('vi_profiles_v2');
+      } catch {
+        // ignore
+      }
 
+      const storedProfiles = localStorage.getItem(STORAGE_KEYS.PROFILES);
+      if (storedProfiles) {
+        const parsed = JSON.parse(storedProfiles);
+        const cleaned = parsed.filter(
+          (p: UserProfile) =>
+            !['ramesh@vi-outreach.com', 'priya@vi-outreach.com', 'ricky@vi-outreach.com'].includes(
+              p.email
+            )
+        );
+        if (!cleaned.some((p: UserProfile) => p.role === 'admin')) {
+          cleaned.unshift(INITIAL_PROFILES[0]);
+        }
+        this.profiles = cleaned;
+      } else {
+        this.profiles = [...INITIAL_PROFILES];
+      }
+
+      // Purge any demo numbers completely
       const storedCust = localStorage.getItem(STORAGE_KEYS.CUSTOMERS);
-      this.customers = storedCust ? JSON.parse(storedCust) : [...INITIAL_CUSTOMERS];
+      if (storedCust) {
+        const parsedCust = JSON.parse(storedCust);
+        this.customers = parsedCust.filter(
+          (c: Customer) =>
+            !c.id.startsWith('cust-10') &&
+            !c.id.startsWith('cust-11') &&
+            !c.id.startsWith('cust-12') &&
+            !['9811223344', '9876543210', '8800112233', '9999888877', '7011223344'].includes(
+              c.customer_number
+            )
+        );
+      } else {
+        this.customers = [];
+      }
 
       const storedPull = localStorage.getItem(STORAGE_KEYS.PULL_HISTORY);
       this.pullHistory = storedPull ? JSON.parse(storedPull) : [];
@@ -73,14 +111,77 @@ class DataStore {
       const storedAudit = localStorage.getItem(STORAGE_KEYS.AUDIT);
       this.auditLogs = storedAudit ? JSON.parse(storedAudit) : [];
 
-      const activeId = localStorage.getItem(STORAGE_KEYS.ACTIVE_USER_ID) || 'user-admin-1';
-      this.activeUser = this.profiles.find(p => p.id === activeId) || this.profiles[0] || null;
+      const activeId = localStorage.getItem(STORAGE_KEYS.ACTIVE_USER_ID);
+      this.activeUser = activeId ? this.profiles.find(p => p.id === activeId) || null : null;
 
       this.persistAll();
     } catch {
       this.profiles = [...INITIAL_PROFILES];
-      this.customers = [...INITIAL_CUSTOMERS];
-      this.activeUser = this.profiles[0];
+      this.customers = [];
+      this.activeUser = null;
+    }
+  }
+
+  // Sync with Supabase on boot and when credentials are saved
+  public async syncWithSupabase() {
+    const client = getSupabaseClient();
+    if (!client || this.isSyncing) return;
+
+    this.isSyncing = true;
+    try {
+      // 1. Fetch remote profiles
+      const { data: remoteProfiles, error: pErr } = await client
+        .from('profiles')
+        .select('*');
+
+      if (!pErr && remoteProfiles && remoteProfiles.length > 0) {
+        // Merge profiles keeping master admin
+        const masterAdmin = this.profiles.find(p => p.role === 'admin') || INITIAL_PROFILES[0];
+        const merged = [masterAdmin];
+        for (const rp of remoteProfiles) {
+          if (!merged.some(m => m.id === rp.id || m.email === rp.email)) {
+            merged.push(rp);
+          }
+        }
+        this.profiles = merged;
+      }
+
+      // 2. Fetch remote customers
+      const { data: remoteCustomers, error: cErr } = await client
+        .from('customers')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (!cErr && remoteCustomers) {
+        this.customers = remoteCustomers as Customer[];
+      }
+
+      // 3. Fetch remote pull history
+      const { data: remotePulls, error: hErr } = await client
+        .from('pull_history')
+        .select('*')
+        .order('pulled_at', { ascending: false });
+
+      if (!hErr && remotePulls) {
+        this.pullHistory = remotePulls as PullHistory[];
+      }
+
+      // 4. Fetch remote template
+      const { data: remoteTmpl, error: tErr } = await client
+        .from('message_templates')
+        .select('*')
+        .eq('is_default', true)
+        .maybeSingle();
+
+      if (!tErr && remoteTmpl && remoteTmpl.template) {
+        this.templates = [remoteTmpl as MessageTemplate];
+      }
+
+      this.persistAll();
+    } catch (err) {
+      console.warn('Supabase sync skipped/failed:', err);
+    } finally {
+      this.isSyncing = false;
     }
   }
 
@@ -95,6 +196,8 @@ class DataStore {
       localStorage.setItem(STORAGE_KEYS.AUDIT, JSON.stringify(this.auditLogs));
       if (this.activeUser) {
         localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, this.activeUser.id);
+      } else {
+        localStorage.removeItem(STORAGE_KEYS.ACTIVE_USER_ID);
       }
     } catch {
       // storage limit or SSR
@@ -129,22 +232,173 @@ class DataStore {
     if (user) {
       this.activeUser = user;
       localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, user.id);
-      this.addAuditLog(user.id, user.name, 'USER_LOGIN', `Switched active user to ${user.name}`);
+      this.addAuditLog(user.id, user.name, 'USER_LOGIN', `User session active for ${user.name}`);
       this.notify();
     }
+  }
+
+  // User Login directly checking Supabase profiles table
+  public async loginUser(identifier: string): Promise<{ success: boolean; error?: string; user?: UserProfile }> {
+    const clean = identifier.trim().toLowerCase();
+    if (!clean) {
+      return { success: false, error: 'Please enter your username or email address.' };
+    }
+
+    const client = getSupabaseClient();
+    if (client) {
+      try {
+        const { data: dbUser, error } = await client
+          .from('profiles')
+          .select('*')
+          .or(`email.ilike.${clean},name.ilike.${clean}`)
+          .maybeSingle();
+
+        if (!error && dbUser) {
+          if (dbUser.status !== 'active') {
+            return {
+              success: false,
+              error: 'Your account is currently disabled. Please contact Administrator.',
+            };
+          }
+
+          // Cache in local profiles
+          const existingIdx = this.profiles.findIndex(p => p.id === dbUser.id);
+          if (existingIdx !== -1) {
+            this.profiles[existingIdx] = dbUser;
+          } else {
+            this.profiles.push(dbUser);
+          }
+
+          this.activeUser = dbUser;
+          localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, dbUser.id);
+          this.addAuditLog(dbUser.id, dbUser.name, 'USER_LOGIN', `Agent ${dbUser.name} logged in via Supabase`);
+          this.persistAll();
+          return { success: true, user: dbUser };
+        }
+      } catch (err) {
+        console.warn('Supabase profile login error, falling back to local store:', err);
+      }
+    }
+
+    // Fallback to local profile check
+    const localUser = this.profiles.find(
+      p =>
+        p.role === 'user' &&
+        (p.email.toLowerCase() === clean ||
+          p.name.toLowerCase() === clean ||
+          p.email.split('@')[0].toLowerCase() === clean)
+    );
+
+    if (!localUser) {
+      return {
+        success: false,
+        error: 'Agent account not found. Please contact Administrator to create your login.',
+      };
+    }
+
+    if (localUser.status !== 'active') {
+      return {
+        success: false,
+        error: 'Your account is currently disabled. Please contact Administrator.',
+      };
+    }
+
+    this.activeUser = localUser;
+    localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, localUser.id);
+    this.addAuditLog(localUser.id, localUser.name, 'USER_LOGIN', `Agent ${localUser.name} logged in`);
+    this.persistAll();
+    return { success: true, user: localUser };
+  }
+
+  public logout() {
+    if (this.activeUser) {
+      this.addAuditLog(
+        this.activeUser.id,
+        this.activeUser.name,
+        'USER_LOGOUT',
+        `User ${this.activeUser.name} logged out`
+      );
+    }
+    this.activeUser = null;
+    localStorage.removeItem(STORAGE_KEYS.ACTIVE_USER_ID);
+    this.persistAll();
   }
 
   public getProfiles(): UserProfile[] {
     return [...this.profiles];
   }
 
-  public createProfile(data: Omit<UserProfile, 'id' | 'created_at' | 'updated_at'>): UserProfile {
+  // Delete User with Supabase deletion
+  public async deleteProfile(userId: string): Promise<{ success: boolean; error?: string }> {
+    const user = this.profiles.find(p => p.id === userId);
+    if (!user) {
+      return { success: false, error: 'User not found.' };
+    }
+    if (user.role === 'admin') {
+      return { success: false, error: 'Cannot delete primary administrator profile.' };
+    }
+
+    const client = getSupabaseClient();
+    if (client) {
+      try {
+        await client.from('profiles').delete().eq('id', userId);
+      } catch (err) {
+        console.warn('Supabase delete profile error:', err);
+      }
+    }
+
+    this.profiles = this.profiles.filter(p => p.id !== userId);
+    if (this.activeUser?.id === userId) {
+      this.activeUser = null;
+      localStorage.removeItem(STORAGE_KEYS.ACTIVE_USER_ID);
+    }
+
+    this.addAuditLog(
+      'admin',
+      'Administrator',
+      'DELETE_USER',
+      `Deleted user account ${user.name} (${user.email})`
+    );
+    this.persistAll();
+    return { success: true };
+  }
+
+  // Create User with Supabase insert
+  public async createProfile(
+    data: Omit<UserProfile, 'id' | 'created_at' | 'updated_at'>
+  ): Promise<UserProfile> {
     const newProfile: UserProfile = {
       ...data,
       id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
+
+    const client = getSupabaseClient();
+    if (client) {
+      try {
+        const { data: inserted, error } = await client
+          .from('profiles')
+          .insert([newProfile])
+          .select()
+          .single();
+
+        if (!error && inserted) {
+          this.profiles.push(inserted as UserProfile);
+          this.addAuditLog(
+            this.activeUser?.id || 'admin',
+            this.activeUser?.name || 'Admin',
+            'CREATE_USER',
+            `Created user ${inserted.name} (${inserted.email}) in Supabase`
+          );
+          this.persistAll();
+          return inserted as UserProfile;
+        }
+      } catch (err) {
+        console.warn('Supabase insert profile error:', err);
+      }
+    }
+
     this.profiles.push(newProfile);
     this.addAuditLog(
       this.activeUser?.id || 'admin',
@@ -156,25 +410,38 @@ class DataStore {
     return newProfile;
   }
 
-  public updateProfile(id: string, updates: Partial<UserProfile>): UserProfile | null {
+  // Update User with Supabase update
+  public async updateProfile(id: string, updates: Partial<UserProfile>): Promise<UserProfile | null> {
     const idx = this.profiles.findIndex(p => p.id === id);
     if (idx === -1) return null;
-    this.profiles[idx] = {
+
+    const updated = {
       ...this.profiles[idx],
       ...updates,
       updated_at: new Date().toISOString(),
     };
+
+    const client = getSupabaseClient();
+    if (client) {
+      try {
+        await client.from('profiles').update(updates).eq('id', id);
+      } catch (err) {
+        console.warn('Supabase update profile error:', err);
+      }
+    }
+
+    this.profiles[idx] = updated;
     if (this.activeUser?.id === id) {
-      this.activeUser = this.profiles[idx];
+      this.activeUser = updated;
     }
     this.addAuditLog(
       this.activeUser?.id || 'admin',
       this.activeUser?.name || 'Admin',
       'UPDATE_USER',
-      `Updated user ${this.profiles[idx].name} limits or status`
+      `Updated user ${updated.name} limits or status`
     );
     this.persistAll();
-    return this.profiles[idx];
+    return updated;
   }
 
   // --- QUOTA & USER PULL STATS ---
@@ -217,22 +484,25 @@ class DataStore {
     requestedCount: number = 1,
     source: string = 'MATCHING_SEND'
   ): Promise<AllocationResult> {
+    const client = getSupabaseClient();
+
     // 1. If Supabase is configured with custom RPC, attempt it first
-    if (isSupabaseConfigured && supabase) {
+    if (client) {
       try {
-        const { data, error } = await supabase.rpc('allocate_customers', {
+        const { data, error } = await client.rpc('allocate_customers', {
           p_user_id: userId,
           p_requested_count: requestedCount,
           p_source: source,
         });
-        if (error) {
-          return { success: false, customers: [], error: error.message };
-        }
-        if (data && Array.isArray(data)) {
-          return { success: true, customers: data as Customer[] };
+
+        if (!error && data && Array.isArray(data) && data.length > 0) {
+          const allocatedFromRpc = data as Customer[];
+          // Sync with local memory
+          await this.syncWithSupabase();
+          return { success: true, customers: allocatedFromRpc };
         }
       } catch (err: any) {
-        console.warn('Supabase RPC fallback to atomic local store:', err);
+        console.warn('Supabase RPC fallback to direct allocation:', err);
       }
     }
 
@@ -276,7 +546,7 @@ class DataStore {
 
       const actualLimit = Math.min(requestedCount, remainingQuota);
 
-      // Lock available customers (equivalent to SELECT ... FOR UPDATE SKIP LOCKED)
+      // Lock available customers
       const availableIndexes: number[] = [];
       for (let i = 0; i < this.customers.length; i++) {
         if (this.customers[i].status === 'AVAILABLE') {
@@ -307,8 +577,25 @@ class DataStore {
 
         allocatedList.push({ ...cust });
 
-        // Record in pull history
-        this.pullHistory.unshift({
+        // Update in Supabase if connected
+        if (client) {
+          try {
+            client
+              .from('customers')
+              .update({
+                status: 'PULLED',
+                allocated_to: user.id,
+                allocated_at: now,
+                pulled_at: now,
+              })
+              .eq('id', cust.id)
+              .then();
+          } catch {
+            // ignore
+          }
+        }
+
+        const pullHistoryItem: PullHistory = {
           id: `pull-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           customer_id: cust.id,
           customer_number: cust.customer_number,
@@ -320,7 +607,17 @@ class DataStore {
           action: 'PULLED',
           source,
           pulled_at: now,
-        });
+        };
+
+        this.pullHistory.unshift(pullHistoryItem);
+
+        if (client) {
+          try {
+            client.from('pull_history').insert([pullHistoryItem]).then();
+          } catch {
+            // ignore
+          }
+        }
       }
 
       this.addAuditLog(
@@ -380,9 +677,9 @@ class DataStore {
     };
   }
 
-  public addCustomer(
+  public async addCustomer(
     data: Omit<Customer, 'id' | 'status' | 'created_at' | 'uploaded_at'>
-  ): { success: boolean; error?: string; customer?: Customer } {
+  ): Promise<{ success: boolean; error?: string; customer?: Customer }> {
     const cleanNum = data.customer_number.replace(/\D/g, '');
     if (cleanNum.length !== 10) {
       return { success: false, error: 'Customer number must be exactly 10 digits.' };
@@ -409,6 +706,15 @@ class DataStore {
       created_at: new Date().toISOString(),
     };
 
+    const client = getSupabaseClient();
+    if (client) {
+      try {
+        await client.from('customers').insert([newCust]);
+      } catch (err) {
+        console.warn('Supabase insert customer error:', err);
+      }
+    }
+
     this.customers.unshift(newCust);
     this.addAuditLog(
       this.activeUser?.id || 'admin',
@@ -420,9 +726,19 @@ class DataStore {
     return { success: true, customer: newCust };
   }
 
-  public updateCustomer(id: string, updates: Partial<Customer>): boolean {
+  public async updateCustomer(id: string, updates: Partial<Customer>): Promise<boolean> {
     const idx = this.customers.findIndex(c => c.id === id);
     if (idx === -1) return false;
+
+    const client = getSupabaseClient();
+    if (client) {
+      try {
+        await client.from('customers').update(updates).eq('id', id);
+      } catch (err) {
+        console.warn('Supabase update customer error:', err);
+      }
+    }
+
     this.customers[idx] = {
       ...this.customers[idx],
       ...updates,
@@ -432,10 +748,20 @@ class DataStore {
     return true;
   }
 
-  public deleteCustomer(id: string): boolean {
+  public async deleteCustomer(id: string): Promise<boolean> {
     const idx = this.customers.findIndex(c => c.id === id);
     if (idx === -1) return false;
     const removed = this.customers.splice(idx, 1)[0];
+
+    const client = getSupabaseClient();
+    if (client) {
+      try {
+        await client.from('customers').delete().eq('id', id);
+      } catch (err) {
+        console.warn('Supabase delete customer error:', err);
+      }
+    }
+
     this.addAuditLog(
       this.activeUser?.id || 'admin',
       this.activeUser?.name || 'Admin',
@@ -446,8 +772,8 @@ class DataStore {
     return true;
   }
 
-  // --- EXCEL / CSV BULK IMPORT ---
-  public importBulkData(
+  // --- EXCEL / CSV BULK IMPORT TO SUPABASE & LOCAL STORE ---
+  public async importBulkData(
     filename: string,
     rows: Array<{
       customer_number: string;
@@ -455,14 +781,14 @@ class DataStore {
       matching_number_2?: string;
       customer_name?: string;
     }>
-  ): {
+  ): Promise<{
     total: number;
     valid: number;
     duplicate: number;
     invalid: number;
     newRows: number;
     addedCustomers: Customer[];
-  } {
+  }> {
     let duplicate = 0;
     let invalid = 0;
     const existingSet = new Set(this.customers.map(c => c.customer_number));
@@ -501,6 +827,20 @@ class DataStore {
       newlyAdded.push(newC);
     }
 
+    // Insert into Supabase in batches
+    const client = getSupabaseClient();
+    if (client && newlyAdded.length > 0) {
+      try {
+        const batchSize = 100;
+        for (let i = 0; i < newlyAdded.length; i += batchSize) {
+          const slice = newlyAdded.slice(i, i + batchSize);
+          await client.from('customers').insert(slice);
+        }
+      } catch (err) {
+        console.warn('Supabase bulk insert error:', err);
+      }
+    }
+
     const uploadRecord: UploadHistory = {
       id: `up-${Date.now()}`,
       uploaded_by: this.activeUser?.id || 'admin',
@@ -515,6 +855,15 @@ class DataStore {
     };
 
     this.uploadHistory.unshift(uploadRecord);
+
+    if (client) {
+      try {
+        client.from('upload_history').insert([uploadRecord]).then();
+      } catch {
+        // ignore
+      }
+    }
+
     this.addAuditLog(
       this.activeUser?.id || 'admin',
       this.activeUser?.name || 'Admin',
@@ -539,7 +888,7 @@ class DataStore {
     return def ? def.template : DEF_FMT;
   }
 
-  public saveTemplate(newTemplate: string): boolean {
+  public async saveTemplate(newTemplate: string): Promise<boolean> {
     const def = this.templates.find(t => t.is_default);
     if (def) {
       def.template = newTemplate;
@@ -554,6 +903,21 @@ class DataStore {
         updated_at: new Date().toISOString(),
       });
     }
+
+    const client = getSupabaseClient();
+    if (client) {
+      try {
+        await client.from('message_templates').upsert({
+          name: 'Default Template',
+          template: newTemplate,
+          is_default: true,
+          updated_at: new Date().toISOString(),
+        });
+      } catch {
+        // ignore
+      }
+    }
+
     this.addAuditLog(
       this.activeUser?.id || 'admin',
       this.activeUser?.name || 'Admin',
@@ -594,6 +958,16 @@ class DataStore {
       status: 'OPENED',
     };
     this.sendHistory.unshift(sendRecord);
+
+    const client = getSupabaseClient();
+    if (client) {
+      try {
+        client.from('send_history').insert([sendRecord]).then();
+      } catch {
+        // ignore
+      }
+    }
+
     this.persistAll();
   }
 
@@ -627,10 +1001,9 @@ class DataStore {
     }
   }
 
-  // Demo data reset helper if needed by Admin
-  public resetToSampleData() {
+  public resetToCleanProduction() {
     this.profiles = [...INITIAL_PROFILES];
-    this.customers = [...INITIAL_CUSTOMERS];
+    this.customers = [];
     this.pullHistory = [];
     this.sendHistory = [];
     this.templates = [
@@ -643,7 +1016,7 @@ class DataStore {
         updated_at: new Date().toISOString(),
       },
     ];
-    this.activeUser = this.profiles[0];
+    this.activeUser = null;
     this.persistAll();
   }
 }
