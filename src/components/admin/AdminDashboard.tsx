@@ -344,7 +344,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
     e.preventDefault();
     if (!newUserForm.name || !newUserForm.email) return;
 
-    await dataStore.createProfile({
+    const created = await dataStore.createProfile({
       name: newUserForm.name,
       email: newUserForm.email,
       role: newUserForm.role,
@@ -352,6 +352,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
       daily_pull_limit: Number(newUserForm.daily_pull_limit) || 100,
       per_pull_limit: Number(newUserForm.per_pull_limit) || 20,
     });
+
+    if (!created.success) {
+      window.alert(`❌ User save nahi hua: ${created.error}`);
+      return;
+    }
 
     setShowAddUserModal(false);
     setNewUserForm({
@@ -368,12 +373,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
     e.preventDefault();
     if (!editingUser) return;
 
-    await dataStore.updateProfile(editingUser.id, {
+    const saved = await dataStore.updateProfile(editingUser.id, {
       daily_pull_limit: editingUser.daily_pull_limit,
       per_pull_limit: editingUser.per_pull_limit,
       status: editingUser.status,
       role: editingUser.role,
     });
+
+    if (!saved.success) {
+      window.alert(`❌ User update nahi hua: ${saved.error}`);
+      return;
+    }
 
     setEditingUser(null);
     refreshAll();
@@ -381,7 +391,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
 
   const handleConfirmDeleteUser = async () => {
     if (!deleteUserModal) return;
-    await dataStore.deleteProfile(deleteUserModal.id);
+    const removed = await dataStore.deleteProfile(deleteUserModal.id);
+    if (!removed.success) {
+      window.alert(`❌ User delete nahi hua: ${removed.error}`);
+      return;
+    }
     setDeleteUserModal(null);
     refreshAll();
   };
