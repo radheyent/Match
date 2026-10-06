@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+:root, [data-theme="dark"] {
+  --ink: #07050E;
+  --panel: #131020;
+  --card: #181528;
+  --card-hi: #1E1B30;
+  --rim: rgba(255,255,255,0.07);
+  --rim-hi: rgba(255,255,255,0.12);
+  --gold: #C9932A;
+  --gold-lt: #E8B84B;
+  --gold-pale: #F5D98A;
+  --violet: #7B3FE4;
+  --violet-lt: #9D6FFF;
+  --rose: #D4447A;
+  --gold-glow: rgba(201,147,42,0.28);
+  --violet-glow: rgba(123,63,228,0.32);
+  --txt: #EDE8F5;
+  --txt2: rgba(237,232,245,0.48);
+  --txt3: rgba(237,232,245,0.22);
+  --ff-b: 'DM Sans', sans-serif;
+  --ff-m: 'DM Mono', monospace;
+  --nav-bg: rgba(7,5,14,0.95);
+  --hint-bg: rgba(123,63,228,0.05);
+  --hint-bdr: rgba(123,63,228,0.15);
+  --hint-txt: rgba(157,111,255,0.7);
+  --inp-bg: rgba(255,255,255,0.03);
+  --overlay-bg: rgba(7,5,14,0.92);
+  --modal-card: #181528;
+  --theme-btn-bg: rgba(255,255,255,0.06);
+  --theme-btn-bdr: rgba(255,255,255,0.12);
+}
+
+[data-theme="light"] {
+  --ink: #F4F1FB;
+  --panel: #ECEAF6;
+  --card: #FFFFFF;
+  --card-hi: #F8F6FF;
+  --rim: rgba(0,0,0,0.09);
+  --rim-hi: rgba(0,0,0,0.16);
+  --gold: #A86E10;
+  --gold-lt: #B87A18;
+  --gold-pale: #8A5A08;
+  --violet: #6230C8;
+  --violet-lt: #7A50D8;
+  --rose: #B83060;
+  --gold-glow: rgba(168,110,16,0.18);
+  --violet-glow: rgba(98,48,200,0.22);
+  --txt: #1A1530;
+  --txt2: rgba(26,21,48,0.58);
+  --txt3: rgba(26,21,48,0.35);
+  --nav-bg: rgba(244,241,251,0.96);
+  --hint-bg: rgba(98,48,200,0.05);
+  --hint-bdr: rgba(98,48,200,0.18);
+  --hint-txt: rgba(98,48,200,0.8);
+  --inp-bg: rgba(0,0,0,0.03);
+  --overlay-bg: rgba(230,226,245,0.92);
+  --modal-card: #FFFFFF;
+  --theme-btn-bg: rgba(0,0,0,0.05);
+  --theme-btn-bdr: rgba(0,0,0,0.12);
+}
+
+@keyframes ringRotate {
+  to { transform: rotate(360deg); }
+}
+
+.vi-ring-spin {
+  animation: ringRotate 6s linear infinite;
+}
+
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.pulse-dot {
+  animation: pulseDot 2s infinite;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--ink);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--rim-hi);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--gold);
+}

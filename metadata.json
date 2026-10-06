@@ -1,0 +1,6 @@
+{
+  "name": "Vi Premium — Smart Outreach & Customer Allocation",
+  "description": "Vi Premium number smart outreach platform with CPOS matching, position checks, WhatsApp/RCS sending, atomic customer allocation, user quotas, and Supabase backend support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
