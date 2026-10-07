@@ -112,7 +112,7 @@ export default function App() {
           </h1>
 
           <p className="text-[10px] sm:text-[11px] text-[var(--txt3)] uppercase tracking-wider font-mono">
-            Smart Matching · WhatsApp & RCS · Bulk Processing · Atomic Supabase Allocation
+            Smart Matching · WhatsApp & RCS · Bulk Processing
           </p>
         </section>
 
