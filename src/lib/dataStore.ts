@@ -722,6 +722,15 @@ class DataStore {
         newHistoryItems.push(pullHistoryItem);
       }
 
+      // A new pull always becomes the Recent bunch
+      if (newHistoryItems.length > 0) {
+        try {
+          localStorage.removeItem(`vi_recent_lot_${userId}`);
+        } catch {
+          // ignore
+        }
+      }
+
       // Pull history must be stored in Supabase
       let warning: string | undefined;
       if (client && newHistoryItems.length > 0) {
@@ -765,12 +774,11 @@ class DataStore {
   }
 
   // Pull history grouped into bunches (lots): numbers pulled together in one pull.
-  // Newest lot first. `limitNumbers` caps how many latest numbers are considered.
-  public getUserPullLots(userId: string, limitNumbers: number = 50): PullLot[] {
+  // Newest lot first, limited to the latest `maxLots` bunches.
+  public getUserPullLots(userId: string, maxLots: number = 5): PullLot[] {
     const mine = this.pullHistory
       .filter(h => h.user_id === userId)
-      .sort((a, b) => new Date(b.pulled_at).getTime() - new Date(a.pulled_at).getTime())
-      .slice(0, limitNumbers);
+      .sort((a, b) => new Date(b.pulled_at).getTime() - new Date(a.pulled_at).getTime());
 
     const lots: PullLot[] = [];
     const byKey = new Map<string, PullLot>();
@@ -785,7 +793,31 @@ class DataStore {
       }
       lot.items.push(item);
     }
-    return lots;
+    return lots.slice(0, maxLots);
+  }
+
+  // "Recent Pulled Data" bunch: the latest pulled bunch, unless the user chose an older
+  // bunch from History ("Send to Matching Recent"). A new pull resets it to the latest.
+  public getRecentLot(userId: string): PullLot | null {
+    const lots = this.getUserPullLots(userId, 1000);
+    if (lots.length === 0) return null;
+    let chosen: string | null = null;
+    try {
+      chosen = localStorage.getItem(`vi_recent_lot_${userId}`);
+    } catch {
+      chosen = null;
+    }
+    return (chosen && lots.find(l => l.key === chosen)) || lots[0];
+  }
+
+  public setRecentLot(userId: string, lotKey: string | null) {
+    try {
+      if (lotKey) localStorage.setItem(`vi_recent_lot_${userId}`, lotKey);
+      else localStorage.removeItem(`vi_recent_lot_${userId}`);
+    } catch {
+      // ignore
+    }
+    this.notify();
   }
 
   // Numbers this user has already sent (WhatsApp / RCS) - used to hide the send buttons
