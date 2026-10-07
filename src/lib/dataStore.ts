@@ -35,6 +35,20 @@ function newUuid(): string {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Only the columns that exist in the Supabase `customers` table
+function toCustomerRow(c: Customer) {
+  return {
+    id: c.id,
+    customer_number: c.customer_number,
+    customer_name: c.customer_name ?? null,
+    matching_number: c.matching_number,
+    matching_number_2: c.matching_number_2 ?? null,
+    status: c.status,
+    uploaded_at: c.uploaded_at,
+    created_at: c.created_at,
+  };
+}
+
 function dbErrorText(err: { message?: string; code?: string } | null | undefined): string {
   if (!err) return 'Unknown database error.';
   return `${err.message || 'Database error'}${err.code ? ` (code ${err.code})` : ''}`;
@@ -146,9 +160,21 @@ class DataStore {
   }
 
   // Sync with Supabase on boot and when credentials are saved
-  public async syncWithSupabase() {
+  public async syncWithSupabase(
+    includeCustomers: boolean = false
+  ): Promise<{ customersLoaded: number | null; errors: string[] }> {
     const client = getSupabaseClient();
-    if (!client || this.isSyncing) return;
+    const errors: string[] = [];
+    if (!client) return { customersLoaded: null, errors };
+
+    // Never skip a sync (e.g. admin unlock) just because another one is still running
+    while (this.isSyncing) {
+      await new Promise(res => setTimeout(res, 50));
+    }
+
+    // Only admins need the full customer list; agents pull through the database function
+    const loadCustomers = includeCustomers || this.activeUser?.role === 'admin';
+    let customersLoaded: number | null = null;
 
     this.isSyncing = true;
     try {
@@ -178,14 +204,53 @@ class DataStore {
         }
       }
 
-      // 2. Fetch remote customers
-      const { data: remoteCustomers, error: cErr } = await client
-        .from('customers')
-        .select('*')
-        .order('created_at', { ascending: false });
+      // 2. Customers (admin only): Supabase is the source of truth, fetched page by page
+      //    because Supabase returns at most 1000 rows per request.
+      if (loadCustomers) {
+        const all: Customer[] = [];
+        const pageSize = 1000;
+        let failed = false;
+        for (let from = 0; from < 200000; from += pageSize) {
+          const { data: page, error: cErr } = await client
+            .from('customers')
+            .select('*')
+            .order('uploaded_at', { ascending: false })
+            .order('id', { ascending: true })
+            .range(from, from + pageSize - 1);
+          if (cErr) {
+            failed = true;
+            errors.push(`Customers fetch failed: ${dbErrorText(cErr)}`);
+            console.error('Supabase customers fetch failed:', dbErrorText(cErr));
+            break;
+          }
+          all.push(...((page || []) as Customer[]));
+          if (!page || page.length < pageSize) break;
+        }
+        if (!failed) {
+          const nameById = new Map(this.profiles.map(p => [p.id, p.name]));
+          this.customers = all.map(c => ({
+            ...c,
+            allocated_to: c.allocated_to || undefined,
+            allocated_to_name: c.allocated_to ? nameById.get(c.allocated_to) : undefined,
+          }));
+          customersLoaded = all.length;
+        }
 
-      if (!cErr && remoteCustomers) {
-        this.customers = remoteCustomers as Customer[];
+        // Upload history (admin)
+        const { data: remoteUploads, error: uErr } = await client
+          .from('upload_history')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(200);
+        if (uErr) {
+          errors.push(`Upload history fetch failed: ${dbErrorText(uErr)}`);
+        } else if (remoteUploads) {
+          const nameById = new Map(this.profiles.map(p => [p.id, p.name]));
+          this.uploadHistory = remoteUploads.map((u: any) => ({
+            ...u,
+            uploaded_by_name: nameById.get(u.uploaded_by) || 'Admin',
+          })) as UploadHistory[];
+        }
       }
 
       // 3. Fetch remote pull history
@@ -195,17 +260,9 @@ class DataStore {
         .order('pulled_at', { ascending: false });
 
       if (!hErr && remotePulls) {
-        // Supabase copy wins; keep local-only rows (e.g. not yet saved) so nothing disappears
-        const remoteList = (remotePulls as PullHistory[]).map(r => ({
-          ...r,
-          customer_id: r.customer_id || '',
-        }));
-        const remoteIds = new Set(remoteList.map(r => r.id));
-        const localOnly = this.pullHistory.filter(l => !remoteIds.has(l.id));
-        this.pullHistory = [...remoteList, ...localOnly].sort(
-          (a, b) => new Date(b.pulled_at).getTime() - new Date(a.pulled_at).getTime()
-        );
+        this.mergePullHistory(remotePulls as PullHistory[]);
       } else if (hErr) {
+        errors.push(`Pull history fetch failed: ${dbErrorText(hErr)}`);
         console.error('Supabase pull_history fetch failed:', dbErrorText(hErr));
       }
 
@@ -223,9 +280,21 @@ class DataStore {
       this.persistAll();
     } catch (err) {
       console.warn('Supabase sync skipped/failed:', err);
+      errors.push(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.isSyncing = false;
     }
+    return { customersLoaded, errors };
+  }
+
+  // Supabase copy wins; keep local-only rows so nothing disappears
+  private mergePullHistory(remote: PullHistory[]) {
+    const remoteList = remote.map(r => ({ ...r, customer_id: r.customer_id || '' }));
+    const remoteIds = new Set(remoteList.map(r => r.id));
+    const localOnly = this.pullHistory.filter(l => !remoteIds.has(l.id));
+    this.pullHistory = [...remoteList, ...localOnly].sort(
+      (a, b) => new Date(b.pulled_at).getTime() - new Date(a.pulled_at).getTime()
+    );
   }
 
   // Make sure the master admin row exists in Supabase (insert-only, never overwrites edits)
@@ -592,27 +661,12 @@ class DataStore {
   ): Promise<AllocationResult> {
     const client = getSupabaseClient();
 
-    // 1. If Supabase is configured with custom RPC, attempt it first
+    // 1. Supabase configured: allocation happens ONLY in the database (atomic, no stale local data)
     if (client) {
-      try {
-        const { data, error } = await client.rpc('allocate_customers', {
-          p_user_id: userId,
-          p_requested_count: requestedCount,
-          p_source: source,
-        });
-
-        if (!error && data && Array.isArray(data) && data.length > 0) {
-          const allocatedFromRpc = data as Customer[];
-          // Sync with local memory
-          await this.syncWithSupabase();
-          return { success: true, customers: allocatedFromRpc };
-        }
-      } catch (err: any) {
-        console.warn('Supabase RPC fallback to direct allocation:', err);
-      }
+      return this.allocateViaSupabase(client, userId, requestedCount, source);
     }
 
-    // 2. Built-in Atomic Implementation with concurrency locking
+    // 2. Local mode (Supabase not configured): built-in allocation
     while (this.allocationLock) {
       await new Promise(res => setTimeout(res, 20));
     }
@@ -685,24 +739,6 @@ class DataStore {
 
         allocatedList.push({ ...cust });
 
-        // Update in Supabase if connected
-        if (client) {
-          try {
-            client
-              .from('customers')
-              .update({
-                status: 'PULLED',
-                allocated_to: user.id,
-                allocated_at: now,
-                pulled_at: now,
-              })
-              .eq('id', cust.id)
-              .then();
-          } catch {
-            // ignore
-          }
-        }
-
         const pullHistoryItem: PullHistory = {
           id: newUuid(),
           customer_id: cust.id,
@@ -731,21 +767,6 @@ class DataStore {
         }
       }
 
-      // Pull history must be stored in Supabase
-      let warning: string | undefined;
-      if (client && newHistoryItems.length > 0) {
-        const payload = newHistoryItems.map(h => ({
-          ...h,
-          // customers are not guaranteed to exist in Supabase; only link real UUIDs
-          customer_id: UUID_RE.test(h.customer_id) ? h.customer_id : null,
-        }));
-        const { error: histErr } = await client.from('pull_history').insert(payload);
-        if (histErr) {
-          console.error('Supabase pull_history save failed:', dbErrorText(histErr));
-          warning = `Pull history Supabase me save nahi hui: ${dbErrorText(histErr)}`;
-        }
-      }
-
       this.addAuditLog(
         user.id,
         user.name,
@@ -757,12 +778,111 @@ class DataStore {
       return {
         success: true,
         customers: allocatedList,
-        warning,
         quotaRemaining: remainingQuota - allocatedList.length,
       };
     } finally {
       this.allocationLock = false;
     }
+  }
+
+  private async allocateViaSupabase(
+    client: NonNullable<ReturnType<typeof getSupabaseClient>>,
+    userId: string,
+    requestedCount: number,
+    source: string
+  ): Promise<AllocationResult> {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const lotId = newUuid();
+
+    const { data, error } = await client.rpc('allocate_customers_v2', {
+      p_user_id: userId,
+      p_requested_count: requestedCount,
+      p_source: source,
+      p_lot_id: lotId,
+      p_day_start: startOfToday.toISOString(),
+    });
+
+    if (error) {
+      const msg = error.message || '';
+      let friendly = `Pull failed: ${dbErrorText(error)}`;
+      if (msg.startsWith('QUOTA_REACHED')) {
+        friendly = `Your daily customer limit (${msg.split(':')[1] || ''}) has been reached.`;
+      } else if (msg.startsWith('PER_PULL_LIMIT')) {
+        friendly = `You can pull maximum ${msg.split(':')[1] || ''} customers at a time.`;
+      } else if (msg.startsWith('USER_DISABLED')) {
+        friendly = 'Your account is disabled. Please contact the administrator.';
+      } else if (msg.startsWith('USER_NOT_FOUND')) {
+        friendly = 'User profile not found in Supabase. Please contact the administrator.';
+      } else if (error.code === 'PGRST202' || /could not find the function/i.test(msg)) {
+        friendly =
+          'Supabase setup pending: supabase-customers-fix.sql ko SQL Editor me run karein (allocate_customers_v2 missing).';
+      }
+      return { success: false, customers: [], error: friendly };
+    }
+
+    const rows = (data || []) as Array<{
+      out_id: string;
+      out_customer_number: string;
+      out_customer_name: string | null;
+      out_matching_number: string;
+      out_matching_number_2: string | null;
+      out_pulled_at: string;
+    }>;
+
+    if (rows.length === 0) {
+      return {
+        success: false,
+        customers: [],
+        error:
+          'No new customer is currently available in the system. Please request Admin to upload fresh data.',
+      };
+    }
+
+    const user = this.profiles.find(p => p.id === userId);
+    const customers: Customer[] = rows.map(r => ({
+      id: r.out_id,
+      customer_number: r.out_customer_number,
+      customer_name: r.out_customer_name || undefined,
+      matching_number: r.out_matching_number,
+      matching_number_2: r.out_matching_number_2 || undefined,
+      status: 'PULLED',
+      allocated_to: userId,
+      allocated_to_name: user?.name,
+      pulled_at: r.out_pulled_at,
+      uploaded_at: r.out_pulled_at,
+      created_at: r.out_pulled_at,
+    }));
+
+    // Load this user's history (written by the database function) into the app
+    let warning: string | undefined;
+    const { data: hist, error: hErr } = await client
+      .from('pull_history')
+      .select('*')
+      .eq('user_id', userId)
+      .order('pulled_at', { ascending: false })
+      .limit(500);
+    if (hErr) {
+      warning = `Pull ho gaya, lekin history refresh nahi hui: ${dbErrorText(hErr)}`;
+    } else if (hist) {
+      this.mergePullHistory(hist as PullHistory[]);
+    }
+
+    try {
+      localStorage.removeItem(`vi_recent_lot_${userId}`);
+    } catch {
+      // ignore
+    }
+
+    this.addAuditLog(userId, user?.name || 'Agent', 'CUSTOMER_PULL', `Pulled ${customers.length} customer(s) via ${source}`);
+    this.persistAll();
+
+    return {
+      success: true,
+      customers,
+      warning,
+      quotaRemaining: this.getUserPullStats(userId).remainingQuota,
+    };
   }
 
   // --- RECENT USER DATA ---
@@ -877,7 +997,7 @@ class DataStore {
     }
 
     const newCust: Customer = {
-      id: `cust-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: newUuid(),
       customer_number: cleanNum,
       customer_name: data.customer_name?.trim() || undefined,
       matching_number: cleanMatch,
@@ -891,10 +1011,15 @@ class DataStore {
 
     const client = getSupabaseClient();
     if (client) {
-      try {
-        await client.from('customers').insert([newCust]);
-      } catch (err) {
-        console.warn('Supabase insert customer error:', err);
+      const { error } = await client.from('customers').insert([toCustomerRow(newCust)]);
+      if (error) {
+        return {
+          success: false,
+          error:
+            error.code === '23505'
+              ? `Customer number ${cleanNum} already exists in database.`
+              : `Supabase save failed: ${dbErrorText(error)}`,
+        };
       }
     }
 
@@ -915,10 +1040,15 @@ class DataStore {
 
     const client = getSupabaseClient();
     if (client) {
-      try {
-        await client.from('customers').update(updates).eq('id', id);
-      } catch (err) {
-        console.warn('Supabase update customer error:', err);
+      const { allocated_to_name: _n, ...dbUpdates } = updates as Partial<Customer>;
+      const { data: rows, error } = await client
+        .from('customers')
+        .update({ ...dbUpdates, updated_at: new Date().toISOString() })
+        .eq('id', id)
+        .select('id');
+      if (error || !rows || rows.length === 0) {
+        console.error('Supabase update customer failed:', error ? dbErrorText(error) : 'no row updated');
+        return false;
       }
     }
 
@@ -934,16 +1064,15 @@ class DataStore {
   public async deleteCustomer(id: string): Promise<boolean> {
     const idx = this.customers.findIndex(c => c.id === id);
     if (idx === -1) return false;
-    const removed = this.customers.splice(idx, 1)[0];
-
     const client = getSupabaseClient();
     if (client) {
-      try {
-        await client.from('customers').delete().eq('id', id);
-      } catch (err) {
-        console.warn('Supabase delete customer error:', err);
+      const { data: rows, error } = await client.from('customers').delete().eq('id', id).select('id');
+      if (error || !rows || rows.length === 0) {
+        console.error('Supabase delete customer failed:', error ? dbErrorText(error) : 'no row deleted');
+        return false;
       }
     }
+    const removed = this.customers.splice(idx, 1)[0];
 
     this.addAuditLog(
       this.activeUser?.id || 'admin',
@@ -955,7 +1084,7 @@ class DataStore {
     return true;
   }
 
-  // --- EXCEL / CSV BULK IMPORT TO SUPABASE & LOCAL STORE ---
+  // --- EXCEL / CSV BULK IMPORT: saved in Supabase (source of truth) ---
   public async importBulkData(
     filename: string,
     rows: Array<{
@@ -970,12 +1099,14 @@ class DataStore {
     duplicate: number;
     invalid: number;
     newRows: number;
+    failed: number;
+    error?: string;
     addedCustomers: Customer[];
   }> {
     let duplicate = 0;
     let invalid = 0;
-    const existingSet = new Set(this.customers.map(c => c.customer_number));
-    const newlyAdded: Customer[] = [];
+    const seen = new Set<string>(this.customers.map(c => c.customer_number));
+    const candidates: Customer[] = [];
     const now = new Date().toISOString();
 
     for (const r of rows) {
@@ -988,15 +1119,13 @@ class DataStore {
         invalid++;
         continue;
       }
-
-      if (existingSet.has(cNum)) {
+      if (seen.has(cNum)) {
         duplicate++;
         continue;
       }
-
-      existingSet.add(cNum);
-      const newC: Customer = {
-        id: `cust-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      seen.add(cNum);
+      candidates.push({
+        id: newUuid(),
         customer_number: cNum,
         customer_name: name || undefined,
         matching_number: m1,
@@ -1004,29 +1133,45 @@ class DataStore {
         status: 'AVAILABLE',
         uploaded_at: now,
         created_at: now,
-      };
-
-      this.customers.unshift(newC);
-      newlyAdded.push(newC);
+      });
     }
 
-    // Insert into Supabase in batches
+    let newlyAdded: Customer[] = candidates;
+    let failed = 0;
+    let uploadError: string | undefined;
+
     const client = getSupabaseClient();
-    if (client && newlyAdded.length > 0) {
-      try {
-        const batchSize = 100;
-        for (let i = 0; i < newlyAdded.length; i += batchSize) {
-          const slice = newlyAdded.slice(i, i + batchSize);
-          await client.from('customers').insert(slice);
+    if (client && candidates.length > 0) {
+      // Insert in chunks; rows already in the database (same customer_number) are skipped
+      const insertedNums = new Set<string>();
+      let processed = 0;
+      const chunkSize = 500;
+      for (let i = 0; i < candidates.length; i += chunkSize) {
+        const chunk = candidates.slice(i, i + chunkSize);
+        const { data, error } = await client
+          .from('customers')
+          .upsert(chunk.map(toCustomerRow), { onConflict: 'customer_number', ignoreDuplicates: true })
+          .select('customer_number');
+        if (error) {
+          uploadError = `Supabase upload failed: ${dbErrorText(error)}`;
+          console.error(uploadError);
+          break;
         }
-      } catch (err) {
-        console.warn('Supabase bulk insert error:', err);
+        (data || []).forEach((d: { customer_number: string }) => insertedNums.add(d.customer_number));
+        processed += chunk.length;
       }
+      newlyAdded = candidates.filter(c => insertedNums.has(c.customer_number));
+      duplicate += Math.max(0, processed - newlyAdded.length);
+      failed = candidates.length - processed;
+    }
+
+    if (newlyAdded.length > 0) {
+      this.customers = [...newlyAdded, ...this.customers];
     }
 
     const uploadRecord: UploadHistory = {
-      id: `up-${Date.now()}`,
-      uploaded_by: this.activeUser?.id || 'admin',
+      id: newUuid(),
+      uploaded_by: this.activeUser?.id || ADMIN_PROFILE_ID,
       uploaded_by_name: this.activeUser?.name || 'Admin',
       filename,
       total_rows: rows.length,
@@ -1040,11 +1185,11 @@ class DataStore {
     this.uploadHistory.unshift(uploadRecord);
 
     if (client) {
-      try {
-        client.from('upload_history').insert([uploadRecord]).then();
-      } catch {
-        // ignore
-      }
+      const { uploaded_by_name: _n, ...dbRecord } = uploadRecord;
+      const { error: uhErr } = await client.from('upload_history').insert([
+        { ...dbRecord, uploaded_by: UUID_RE.test(dbRecord.uploaded_by) ? dbRecord.uploaded_by : null },
+      ]);
+      if (uhErr) console.error('Supabase upload_history save failed:', dbErrorText(uhErr));
     }
 
     this.addAuditLog(
@@ -1061,6 +1206,8 @@ class DataStore {
       duplicate,
       invalid,
       newRows: newlyAdded.length,
+      failed,
+      error: uploadError,
       addedCustomers: newlyAdded,
     };
   }
