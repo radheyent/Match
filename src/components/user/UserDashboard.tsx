@@ -52,7 +52,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
       } catch {
         saved = null;
       }
-      const valid = ['send', 'single', 'bulk', 'check', 'history'];
+      const valid = ['send', 'bulk', 'history'];
       setActiveTab(saved && valid.includes(saved) ? (saved as typeof activeTab) : 'send');
     } else {
       setActiveTab('single');
@@ -77,45 +77,23 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
     <div className="space-y-5">
       {/* If Agent is logged in: Show quota stats */}
       {currentUser ? (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3">
-          <div className="p-3.5 rounded-xl border border-[var(--rim)] bg-[var(--panel)] shadow-sm">
-            <div className="text-base mb-0.5">🔢</div>
-            <div className="text-xl sm:text-2xl font-mono font-bold bg-gradient-to-r from-[var(--gold-lt)] to-[var(--gold-pale)] bg-clip-text text-transparent">
+        <div className="grid grid-cols-2 gap-2">
+          <div className="px-3 py-2 rounded-xl border border-[var(--rim)] bg-[var(--panel)] shadow-sm flex items-center justify-center gap-2 text-xs">
+            <span>🔢</span>
+            <span className="text-[var(--txt3)]">|</span>
+            <span className="font-mono font-bold text-sm bg-gradient-to-r from-[var(--gold-lt)] to-[var(--gold-pale)] bg-clip-text text-transparent">
               {stats.pulledToday}
-            </div>
-            <div className="text-[9px] font-mono text-[var(--txt3)] uppercase tracking-wider mt-0.5">
-              Pulled Today
-            </div>
+            </span>
+            <span className="text-[var(--txt3)]">|</span>
+            <span className="text-[var(--txt3)]">Pulled Today</span>
           </div>
 
-          <div className="p-3.5 rounded-xl border border-[var(--rim)] bg-[var(--panel)] shadow-sm">
-            <div className="text-base mb-0.5">🎯</div>
-            <div className="text-xl sm:text-2xl font-mono font-bold text-emerald-400">
-              {stats.remainingQuota}
-            </div>
-            <div className="text-[9px] font-mono text-[var(--txt3)] uppercase tracking-wider mt-0.5">
-              Quota Remaining
-            </div>
-          </div>
-
-          <div className="p-3.5 rounded-xl border border-[var(--rim)] bg-[var(--panel)] shadow-sm">
-            <div className="text-base mb-0.5">📊</div>
-            <div className="text-xl sm:text-2xl font-mono font-bold text-[var(--txt)]">
-              {stats.dailyLimit}
-            </div>
-            <div className="text-[9px] font-mono text-[var(--txt3)] uppercase tracking-wider mt-0.5">
-              Daily Pull Limit
-            </div>
-          </div>
-
-          <div className="p-3.5 rounded-xl border border-[var(--rim)] bg-[var(--panel)] shadow-sm">
-            <div className="text-base mb-0.5">⚡</div>
-            <div className="text-xl sm:text-2xl font-mono font-bold text-[var(--violet-lt)]">
-              {stats.perPullLimit}
-            </div>
-            <div className="text-[9px] font-mono text-[var(--txt3)] uppercase tracking-wider mt-0.5">
-              Max Per Pull
-            </div>
+          <div className="px-3 py-2 rounded-xl border border-[var(--rim)] bg-[var(--panel)] shadow-sm flex items-center justify-center gap-2 text-xs">
+            <span>🎯</span>
+            <span className="text-[var(--txt3)]">|</span>
+            <span className="font-mono font-bold text-sm text-emerald-400">{stats.remainingQuota}</span>
+            <span className="text-[var(--txt3)]">|</span>
+            <span className="text-[var(--txt3)]">Quota Left</span>
           </div>
         </div>
       ) : (
@@ -163,6 +141,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
           </button>
         )}
 
+        {!currentUser && (
         <button
           onClick={() => setActiveTab('single')}
           className={`py-2 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
@@ -174,6 +153,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
           <span>👤</span>
           <span>Single (10 Var)</span>
         </button>
+        )}
 
         <button
           onClick={() => setActiveTab('bulk')}
@@ -187,6 +167,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
           <span>Bulk Process</span>
         </button>
 
+        {!currentUser && (
         <button
           onClick={() => setActiveTab('check')}
           className={`py-2 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
@@ -198,6 +179,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
           <span>🔍</span>
           <span>Position Match</span>
         </button>
+        )}
 
         {currentUser && (
           <button
