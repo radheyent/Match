@@ -30,6 +30,12 @@ export interface Customer {
   updated_at?: string;
 }
 
+export interface PullLot {
+  key: string;
+  pulled_at: string;
+  items: PullHistory[];
+}
+
 export interface PullHistory {
   id: string;
   customer_id: string;
@@ -93,5 +99,6 @@ export interface AllocationResult {
   success: boolean;
   customers: Customer[];
   error?: string;
+  warning?: string;
   quotaRemaining?: number;
 }
