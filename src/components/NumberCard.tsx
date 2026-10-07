@@ -12,6 +12,8 @@ interface NumberCardProps {
   isEnteredNumber?: boolean;
   onSameNumberAlert?: (number: string, actionUrl: string, type: 'wa' | 'rcs') => void;
   customerId?: string;
+  hideAfterSend?: boolean; // hide WA/RCS buttons once sent
+  alreadySent?: boolean; // already sent earlier (from send history)
 }
 
 export const NumberCard: React.FC<NumberCardProps> = ({
@@ -24,6 +26,8 @@ export const NumberCard: React.FC<NumberCardProps> = ({
   isEnteredNumber = false,
   onSameNumberAlert,
   customerId,
+  hideAfterSend = false,
+  alreadySent = false,
 }) => {
   const [isSent, setIsSent] = useState<boolean>(false);
 
@@ -121,33 +125,39 @@ export const NumberCard: React.FC<NumberCardProps> = ({
       </div>
 
       {/* Action Buttons */}
-      <div className="flex items-center gap-1 shrink-0">
-        <a
-          href={isEnteredNumber ? '#' : waUrl}
-          target={isEnteredNumber ? undefined : '_blank'}
-          rel="noopener noreferrer"
-          onClick={handleWaClick}
-          className={`px-2.5 py-1 rounded-md text-[11px] font-medium text-white transition-opacity inline-flex items-center gap-1 ${
-            isSent
-              ? 'bg-white/10 text-[var(--txt3)] cursor-default'
-              : 'bg-[#1FAD54] hover:opacity-90 shadow-sm'
-          }`}
-        >
-          {isSent ? '✅' : '💬 WA'}
-        </a>
+      {hideAfterSend && (isSent || alreadySent) ? (
+        <div className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold text-emerald-400 bg-emerald-950/30 border border-emerald-800/40">
+          ✅ Sent
+        </div>
+      ) : (
+        <div className="flex items-center gap-1 shrink-0">
+          <a
+            href={isEnteredNumber ? '#' : waUrl}
+            target={isEnteredNumber ? undefined : '_blank'}
+            rel="noopener noreferrer"
+            onClick={handleWaClick}
+            className={`px-2.5 py-1 rounded-md text-[11px] font-medium text-white transition-opacity inline-flex items-center gap-1 ${
+              isSent
+                ? 'bg-white/10 text-[var(--txt3)] cursor-default'
+                : 'bg-[#1FAD54] hover:opacity-90 shadow-sm'
+            }`}
+          >
+            {isSent ? '✅' : '💬 WA'}
+          </a>
 
-        <a
-          href={isEnteredNumber ? '#' : rcsUrl}
-          onClick={handleRcsClick}
-          className={`px-2.5 py-1 rounded-md text-[11px] font-medium text-white transition-opacity inline-flex items-center gap-1 ${
-            isSent
-              ? 'bg-white/10 text-[var(--txt3)] cursor-default'
-              : 'bg-[#1667D9] hover:opacity-90 shadow-sm'
-          }`}
-        >
-          {isSent ? '✅' : '✉️ RCS'}
-        </a>
-      </div>
+          <a
+            href={isEnteredNumber ? '#' : rcsUrl}
+            onClick={handleRcsClick}
+            className={`px-2.5 py-1 rounded-md text-[11px] font-medium text-white transition-opacity inline-flex items-center gap-1 ${
+              isSent
+                ? 'bg-white/10 text-[var(--txt3)] cursor-default'
+                : 'bg-[#1667D9] hover:opacity-90 shadow-sm'
+            }`}
+          >
+            {isSent ? '✅' : '✉️ RCS'}
+          </a>
+        </div>
+      )}
     </div>
   );
 };
