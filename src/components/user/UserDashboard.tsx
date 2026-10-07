@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { UserProfile, PullHistory } from '../../types';
+import { UserProfile, PullHistory, SendHistory } from '../../types';
 import { dataStore } from '../../lib/dataStore';
 import { MatchingNumberSend } from '../matching/MatchingNumberSend';
 import { SingleMatch } from '../matching/SingleMatch';
 import { BulkMatch } from '../matching/BulkMatch';
 import { PositionMatch } from '../matching/PositionMatch';
-import { NumberCard } from '../NumberCard';
 
 interface UserDashboardProps {
   currentUser: UserProfile | null;
@@ -23,12 +22,25 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
       : { pulledToday: 0, remainingQuota: 0, dailyLimit: 0, perPullLimit: 0, totalPulled: 0 }
   );
   const [history, setHistory] = useState<PullHistory[]>([]);
+  const [sendHistory, setSendHistory] = useState<SendHistory[]>([]);
 
   const refreshData = () => {
     if (currentUser) {
       setStats(dataStore.getUserPullStats(currentUser.id));
       const allPulls = dataStore.getPullHistory();
-      setHistory(allPulls.filter(p => p.user_id === currentUser.id));
+      setHistory(
+        allPulls
+          .filter(p => p.user_id === currentUser.id)
+          .sort((a, b) => new Date(b.pulled_at).getTime() - new Date(a.pulled_at).getTime())
+          .slice(0, 50)
+      );
+      setSendHistory(
+        dataStore
+          .getSendHistory()
+          .filter(r => r.user_id === currentUser.id)
+          .sort((a, b) => new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime())
+          .slice(0, 50)
+      );
     }
   };
 
@@ -192,13 +204,12 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
         {activeTab === 'check' && <PositionMatch />}
         {activeTab === 'history' && currentUser && (
           <div className="space-y-4">
+            {/* Pulled history (last 50) */}
             <div className="p-4 sm:p-5 rounded-2xl border border-[var(--rim)] bg-[var(--card)] shadow-md">
               <div className="flex items-center justify-between mb-4">
                 <div>
-                  <h3 className="text-sm font-bold text-[var(--txt)]">📜 Your Customer Pull History</h3>
-                  <p className="text-xs text-[var(--txt3)]">
-                    Trace of customers allocated exclusively to your account from Supabase
-                  </p>
+                  <h3 className="text-sm font-bold text-[var(--txt)]">📥 Pulled History</h3>
+                  <p className="text-xs text-[var(--txt3)]">Your last 50 pulled numbers</p>
                 </div>
                 <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-medium bg-[rgba(201,147,42,0.1)] text-[var(--gold-lt)] border border-[rgba(201,147,42,0.3)]">
                   {history.length} records
@@ -206,29 +217,72 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
               </div>
 
               {history.length === 0 ? (
-                <div className="py-12 text-center text-[var(--txt3)]">
-                  <div className="text-2xl mb-1.5">📭</div>
-                  <div className="text-xs">No customer pull records found yet.</div>
-                  <div className="text-[11px] text-[var(--txt3)] mt-0.5">
-                    Click "Matching Send" above to allocate your first customer!
-                  </div>
+                <div className="py-8 text-center text-xs text-[var(--txt3)]">
+                  📭 No pulled numbers yet.
                 </div>
               ) : (
-                <div className="space-y-2.5">
+                <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
                   {history.map(item => (
-                    <NumberCard
+                    <div
                       key={item.id}
-                      customerId={item.customer_id}
-                      customerNumber={item.customer_number}
-                      matches={
-                        item.matching_number_2
-                          ? [item.matching_number, item.matching_number_2]
-                          : [item.matching_number]
-                      }
-                      customerName={item.customer_name}
-                      tagLabel="📜 Pulled"
-                      tagClass="bg-blue-950/40 text-blue-300 border-blue-800/40"
-                    />
+                      className="flex items-center justify-between gap-3 p-3 rounded-xl border border-[var(--rim)] bg-[var(--inp-bg)]"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-mono text-sm font-bold text-[var(--txt)] tracking-wider">
+                          {item.customer_number}
+                        </div>
+                        <div className="text-[11px] font-mono text-[var(--txt3)] truncate">
+                          ↔{' '}
+                          {item.matching_number_2
+                            ? `${item.matching_number} & ${item.matching_number_2}`
+                            : item.matching_number}
+                          {item.customer_name ? ` • ${item.customer_name}` : ''}
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-mono text-[var(--txt3)] shrink-0">
+                        {new Date(item.pulled_at).toLocaleString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Send message history (last 50) */}
+            <div className="p-4 sm:p-5 rounded-2xl border border-[var(--rim)] bg-[var(--card)] shadow-md">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-sm font-bold text-[var(--txt)]">📤 Send Message History</h3>
+                  <p className="text-xs text-[var(--txt3)]">Your last 50 sent numbers</p>
+                </div>
+                <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-medium bg-emerald-950/30 text-emerald-400 border border-emerald-800/40">
+                  {sendHistory.length} records
+                </span>
+              </div>
+
+              {sendHistory.length === 0 ? (
+                <div className="py-8 text-center text-xs text-[var(--txt3)]">
+                  📭 No messages sent yet.
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                  {sendHistory.map(item => (
+                    <div
+                      key={item.id}
+                      className="flex items-center justify-between gap-3 p-3 rounded-xl border border-[var(--rim)] bg-[var(--inp-bg)]"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-mono text-sm font-bold text-[var(--txt)] tracking-wider">
+                          {item.customer_number}
+                        </div>
+                        <div className="text-[11px] font-mono text-[var(--txt3)]">
+                          {item.channel === 'wa' ? '💬 WhatsApp' : item.channel === 'rcs' ? '✉️ RCS' : '✉️ SMS'}
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-mono text-[var(--txt3)] shrink-0">
+                        {new Date(item.sent_at).toLocaleString()}
+                      </span>
+                    </div>
                   ))}
                 </div>
               )}
