@@ -30,7 +30,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
   const refreshData = () => {
     if (currentUser) {
       setStats(dataStore.getUserPullStats(currentUser.id));
-      setLots(dataStore.getUserPullLots(currentUser.id, 50));
+      setLots(dataStore.getUserPullLots(currentUser.id, 5));
       setSentNumbers(dataStore.getSentNumbers(currentUser.id));
       setSendHistory(
         dataStore
@@ -42,13 +42,33 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
     }
   };
 
+  // Only react to login/logout (user id), not to every new currentUser object,
+  // so the open tab is not reset after each send.
   useEffect(() => {
     if (currentUser) {
-      setActiveTab('send');
-      refreshData();
+      let saved: string | null = null;
+      try {
+        saved = sessionStorage.getItem('match_user_tab');
+      } catch {
+        saved = null;
+      }
+      const valid = ['send', 'single', 'bulk', 'check', 'history'];
+      setActiveTab(saved && valid.includes(saved) ? (saved as typeof activeTab) : 'send');
     } else {
       setActiveTab('single');
     }
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('match_user_tab', activeTab);
+    } catch {
+      // ignore
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    refreshData();
     const unsubscribe = dataStore.subscribe(refreshData);
     return () => unsubscribe();
   }, [currentUser]);
@@ -196,7 +216,9 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
 
       {/* Main View Area */}
       <div>
-        {activeTab === 'send' && currentUser && <MatchingNumberSend currentUser={currentUser} />}
+        {activeTab === 'send' && currentUser && (
+          <MatchingNumberSend key={currentUser.id} currentUser={currentUser} />
+        )}
         {activeTab === 'single' && <SingleMatch />}
         {activeTab === 'bulk' && <BulkMatch />}
         {activeTab === 'check' && <PositionMatch />}
@@ -208,7 +230,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
                 <div>
                   <h3 className="text-sm font-bold text-[var(--txt)]">📥 Pulled History</h3>
                   <p className="text-xs text-[var(--txt3)]">
-                    Your last 50 pulled numbers, grouped by pull. Open a bunch to send.
+                    Your last 5 bunches (one bunch = one pull). Open a bunch to send or re-send.
                   </p>
                 </div>
                 <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-medium bg-[rgba(201,147,42,0.1)] text-[var(--gold-lt)] border border-[rgba(201,147,42,0.3)]">
@@ -227,30 +249,43 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
                     const left = lot.items.filter(i => !sentNumbers.has(i.customer_number)).length;
                     return (
                       <div key={lot.key} className="rounded-xl border border-[var(--rim)] bg-[var(--inp-bg)]">
-                        <button
-                          onClick={() => {
-                            const next = new Set(openLots);
-                            if (isOpen) {
-                              next.delete(lot.key);
-                              next.add('closed-' + lot.key);
-                            } else {
-                              next.add(lot.key);
-                              next.delete('closed-' + lot.key);
-                            }
-                            setOpenLots(next);
-                          }}
-                          className="w-full flex items-center justify-between gap-3 p-3 text-left cursor-pointer"
-                        >
-                          <div>
+                        <div className="flex items-center justify-between gap-2 p-3">
+                          <button
+                            onClick={() => {
+                              const next = new Set(openLots);
+                              if (isOpen) {
+                                next.delete(lot.key);
+                                next.add('closed-' + lot.key);
+                              } else {
+                                next.add(lot.key);
+                                next.delete('closed-' + lot.key);
+                              }
+                              setOpenLots(next);
+                            }}
+                            className="flex-1 min-w-0 text-left cursor-pointer"
+                          >
                             <div className="text-xs font-bold text-[var(--txt)]">
-                              {idx === 0 ? '🆕 Latest bunch' : '📦 Bunch'} • {lot.items.length} numbers
+                              {isOpen ? '▲' : '▼'} {idx === 0 ? '🆕 Latest bunch' : '📦 Bunch'} • {lot.items.length} numbers
                             </div>
                             <div className="text-[10px] font-mono text-[var(--txt3)]">
                               {new Date(lot.pulled_at).toLocaleString()} • {left} left to send
                             </div>
-                          </div>
-                          <span className="text-xs text-[var(--gold-lt)]">{isOpen ? '▲' : '▼'}</span>
-                        </button>
+                          </button>
+                          <button
+                            onClick={() => {
+                              dataStore.setRecentLot(currentUser.id, lot.key);
+                              try {
+                                sessionStorage.setItem(`match_send_mode_${currentUser.id}`, 'recent');
+                              } catch {
+                                // ignore
+                              }
+                              setActiveTab('send');
+                            }}
+                            className="shrink-0 px-2.5 py-1.5 rounded-lg text-[10px] font-semibold text-[var(--gold-lt)] bg-[rgba(201,147,42,0.1)] border border-[rgba(201,147,42,0.3)] hover:bg-[rgba(201,147,42,0.2)] cursor-pointer"
+                          >
+                            📤 Send to Matching Recent
+                          </button>
+                        </div>
 
                         {isOpen && (
                           <div className="p-3 pt-0 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
