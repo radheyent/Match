@@ -738,6 +738,26 @@ class DataStore {
       .slice(0, limit);
   }
 
+  // Last lot = all numbers pulled together in the user's most recent pull.
+  // Stays the same until the user pulls new data.
+  public getUserLastLot(userId: string): Customer[] {
+    const mine = this.customers.filter(
+      c => c.allocated_to === userId && c.status === 'PULLED' && c.pulled_at
+    );
+    if (mine.length === 0) return [];
+    const latest = Math.max(...mine.map(c => new Date(c.pulled_at as string).getTime()));
+    return mine.filter(c => new Date(c.pulled_at as string).getTime() === latest);
+  }
+
+  // Customers this user has already sent (WhatsApp / RCS) - used to hide the send buttons
+  public getSentCustomerIds(userId: string): Set<string> {
+    const ids = new Set<string>();
+    for (const rec of this.sendHistory) {
+      if (rec.user_id === userId && rec.customer_id) ids.add(rec.customer_id);
+    }
+    return ids;
+  }
+
   // --- CUSTOMER DATA MANAGEMENT ---
   public getAllCustomers(): Customer[] {
     return [...this.customers];
