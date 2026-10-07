@@ -30,6 +30,7 @@ export const NumberCard: React.FC<NumberCardProps> = ({
   alreadySent = false,
 }) => {
   const [isSent, setIsSent] = useState<boolean>(false);
+  const [resendUnlocked, setResendUnlocked] = useState<boolean>(false);
 
   const activeTemplate = dataStore.getActiveTemplate();
   const message = buildMsg(customerNumber, matches, customerName, activeTemplate);
@@ -64,6 +65,13 @@ export const NumberCard: React.FC<NumberCardProps> = ({
       message,
     });
     setIsSent(true);
+  };
+
+  const handleResend = () => {
+    if (window.confirm(`Are you sure you want to Re-Send to ${customerNumber}?`)) {
+      setIsSent(false);
+      setResendUnlocked(true);
+    }
   };
 
   // Render phone digits with optional highlighted index
@@ -125,10 +133,15 @@ export const NumberCard: React.FC<NumberCardProps> = ({
       </div>
 
       {/* Action Buttons */}
-      {hideAfterSend && (isSent || alreadySent) ? (
-        <div className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold text-emerald-400 bg-emerald-950/30 border border-emerald-800/40">
-          ✅ Sent
-        </div>
+      {hideAfterSend && (isSent || (alreadySent && !resendUnlocked)) ? (
+        <button
+          type="button"
+          onClick={handleResend}
+          title="Click to Re-Send"
+          className="shrink-0 px-2.5 py-1 rounded-md text-[11px] font-semibold text-emerald-400 bg-emerald-950/30 border border-emerald-800/40 hover:bg-emerald-900/40 cursor-pointer"
+        >
+          ✅ Sent • Re-Send
+        </button>
       ) : (
         <div className="flex items-center gap-1 shrink-0">
           <a
