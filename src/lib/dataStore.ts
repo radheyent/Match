@@ -7,6 +7,7 @@ import {
   UploadHistory,
   AuditLog,
   AllocationResult,
+  PullLot,
 } from '../types';
 import { DEF_FMT, INITIAL_PROFILES, ADMIN_PROFILE_ID, LEGACY_ADMIN_PROFILE_ID } from './constants';
 import { getSupabaseClient } from './supabaseClient';
@@ -31,6 +32,8 @@ function newUuid(): string {
     return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
   });
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function dbErrorText(err: { message?: string; code?: string } | null | undefined): string {
   if (!err) return 'Unknown database error.';
@@ -192,7 +195,18 @@ class DataStore {
         .order('pulled_at', { ascending: false });
 
       if (!hErr && remotePulls) {
-        this.pullHistory = remotePulls as PullHistory[];
+        // Supabase copy wins; keep local-only rows (e.g. not yet saved) so nothing disappears
+        const remoteList = (remotePulls as PullHistory[]).map(r => ({
+          ...r,
+          customer_id: r.customer_id || '',
+        }));
+        const remoteIds = new Set(remoteList.map(r => r.id));
+        const localOnly = this.pullHistory.filter(l => !remoteIds.has(l.id));
+        this.pullHistory = [...remoteList, ...localOnly].sort(
+          (a, b) => new Date(b.pulled_at).getTime() - new Date(a.pulled_at).getTime()
+        );
+      } else if (hErr) {
+        console.error('Supabase pull_history fetch failed:', dbErrorText(hErr));
       }
 
       // 4. Fetch remote template
@@ -656,7 +670,9 @@ class DataStore {
       }
 
       const allocatedList: Customer[] = [];
+      const newHistoryItems: PullHistory[] = [];
       const now = new Date().toISOString();
+      const lotId = newUuid(); // one id for every number pulled together (a "bunch")
 
       for (const idx of availableIndexes) {
         const cust = this.customers[idx];
@@ -688,7 +704,7 @@ class DataStore {
         }
 
         const pullHistoryItem: PullHistory = {
-          id: `pull-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          id: newUuid(),
           customer_id: cust.id,
           customer_number: cust.customer_number,
           customer_name: cust.customer_name,
@@ -699,16 +715,25 @@ class DataStore {
           action: 'PULLED',
           source,
           pulled_at: now,
+          metadata: { lot_id: lotId },
         };
 
         this.pullHistory.unshift(pullHistoryItem);
+        newHistoryItems.push(pullHistoryItem);
+      }
 
-        if (client) {
-          try {
-            client.from('pull_history').insert([pullHistoryItem]).then();
-          } catch {
-            // ignore
-          }
+      // Pull history must be stored in Supabase
+      let warning: string | undefined;
+      if (client && newHistoryItems.length > 0) {
+        const payload = newHistoryItems.map(h => ({
+          ...h,
+          // customers are not guaranteed to exist in Supabase; only link real UUIDs
+          customer_id: UUID_RE.test(h.customer_id) ? h.customer_id : null,
+        }));
+        const { error: histErr } = await client.from('pull_history').insert(payload);
+        if (histErr) {
+          console.error('Supabase pull_history save failed:', dbErrorText(histErr));
+          warning = `Pull history Supabase me save nahi hui: ${dbErrorText(histErr)}`;
         }
       }
 
@@ -723,6 +748,7 @@ class DataStore {
       return {
         success: true,
         customers: allocatedList,
+        warning,
         quotaRemaining: remainingQuota - allocatedList.length,
       };
     } finally {
@@ -738,24 +764,37 @@ class DataStore {
       .slice(0, limit);
   }
 
-  // Last lot = all numbers pulled together in the user's most recent pull.
-  // Stays the same until the user pulls new data.
-  public getUserLastLot(userId: string): Customer[] {
-    const mine = this.customers.filter(
-      c => c.allocated_to === userId && c.status === 'PULLED' && c.pulled_at
-    );
-    if (mine.length === 0) return [];
-    const latest = Math.max(...mine.map(c => new Date(c.pulled_at as string).getTime()));
-    return mine.filter(c => new Date(c.pulled_at as string).getTime() === latest);
+  // Pull history grouped into bunches (lots): numbers pulled together in one pull.
+  // Newest lot first. `limitNumbers` caps how many latest numbers are considered.
+  public getUserPullLots(userId: string, limitNumbers: number = 50): PullLot[] {
+    const mine = this.pullHistory
+      .filter(h => h.user_id === userId)
+      .sort((a, b) => new Date(b.pulled_at).getTime() - new Date(a.pulled_at).getTime())
+      .slice(0, limitNumbers);
+
+    const lots: PullLot[] = [];
+    const byKey = new Map<string, PullLot>();
+    for (const item of mine) {
+      const lotId = (item.metadata as { lot_id?: string } | undefined)?.lot_id;
+      const key = lotId || `t-${new Date(item.pulled_at).getTime()}`;
+      let lot = byKey.get(key);
+      if (!lot) {
+        lot = { key, pulled_at: item.pulled_at, items: [] };
+        byKey.set(key, lot);
+        lots.push(lot);
+      }
+      lot.items.push(item);
+    }
+    return lots;
   }
 
-  // Customers this user has already sent (WhatsApp / RCS) - used to hide the send buttons
-  public getSentCustomerIds(userId: string): Set<string> {
-    const ids = new Set<string>();
+  // Numbers this user has already sent (WhatsApp / RCS) - used to hide the send buttons
+  public getSentNumbers(userId: string): Set<string> {
+    const nums = new Set<string>();
     for (const rec of this.sendHistory) {
-      if (rec.user_id === userId && rec.customer_id) ids.add(rec.customer_id);
+      if (rec.user_id === userId) nums.add(rec.customer_number);
     }
-    return ids;
+    return nums;
   }
 
   // --- CUSTOMER DATA MANAGEMENT ---
