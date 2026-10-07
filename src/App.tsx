@@ -44,7 +44,7 @@ export default function App() {
     setShowAdminPwModal(false);
 
     // Pull the latest admin + user profiles from Supabase before opening the dashboard
-    await dataStore.syncWithSupabase();
+    await dataStore.syncWithSupabase(true);
 
     // Primary admin session
     const adminProfile = dataStore.getProfiles().find(p => p.role === 'admin') || {
