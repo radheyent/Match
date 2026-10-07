@@ -9,7 +9,25 @@ interface MatchingNumberSendProps {
 
 export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentUser }) => {
   // Selected mode ('recent' | 'new' | null)
-  const [selectedMode, setSelectedMode] = useState<'recent' | 'new' | null>(null);
+  // Kept in sessionStorage so coming back from WhatsApp / refresh keeps the same screen
+  const modeKey = `match_send_mode_${currentUser.id}`;
+  const [selectedMode, setSelectedMode] = useState<'recent' | 'new' | null>(() => {
+    try {
+      // a "new" pull screen comes back as the Recent bunch (the just-pulled numbers)
+      return sessionStorage.getItem(modeKey) ? 'recent' : null;
+    } catch {
+      return null;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      if (selectedMode) sessionStorage.setItem(modeKey, selectedMode);
+      else sessionStorage.removeItem(modeKey);
+    } catch {
+      // ignore
+    }
+  }, [selectedMode]);
 
   // New Customer Pull state
   const [pullCount, setPullCount] = useState<number>(1);
@@ -20,25 +38,27 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
   // Recent Data state: only the user's last pulled lot, plus which ones are already sent
   const [recentCustomers, setRecentCustomers] = useState<PullHistory[]>([]);
   const [sentIds, setSentIds] = useState<Set<string>>(new Set()); // sent customer numbers
+  const [recentTime, setRecentTime] = useState<string>('');
   const [pullWarning, setPullWarning] = useState<string>('');
 
   // Quota info
   const [quotaStats, setQuotaStats] = useState(dataStore.getUserPullStats(currentUser.id));
 
   const refreshRecent = () => {
-    const lots = dataStore.getUserPullLots(currentUser.id, 50);
-    setRecentCustomers(lots.length > 0 ? lots[0].items : []);
+    const lot = dataStore.getRecentLot(currentUser.id);
+    setRecentCustomers(lot ? lot.items : []);
+    setRecentTime(lot ? lot.pulled_at : '');
     setSentIds(dataStore.getSentNumbers(currentUser.id));
     setQuotaStats(dataStore.getUserPullStats(currentUser.id));
   };
 
+  // Depends on the user id only: a new currentUser object (e.g. after every send)
+  // must NOT reset the screen back to the "choose" page.
   useEffect(() => {
-    setSelectedMode(null);
-    setNewlyPulled([]);
     refreshRecent();
     const unsubscribe = dataStore.subscribe(refreshRecent);
     return () => unsubscribe();
-  }, [currentUser]);
+  }, [currentUser.id]);
 
   const handlePullNewCustomer = async () => {
     setIsPulling(true);
@@ -256,7 +276,9 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
         <div className="p-6 rounded-2xl border border-[var(--rim)] bg-[var(--card)] space-y-4 animate-fade-in shadow-md">
           <div className="flex items-center justify-between border-b border-[var(--rim)] pb-3">
             <div>
-              <h4 className="text-sm font-bold text-[var(--txt)]">📜 Last Pulled Lot</h4>
+              <h4 className="text-sm font-bold text-[var(--txt)]">
+                📜 Recent Pulled Data{recentTime ? ` • ${new Date(recentTime).toLocaleString()}` : ''}
+              </h4>
               <p className="text-xs text-[var(--txt3)]">
                 Send from here. Sent numbers show ✅ and the buttons are hidden.
               </p>
