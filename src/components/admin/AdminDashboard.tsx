@@ -98,10 +98,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
   const handleManualSync = async () => {
     setIsSyncingSupabase(true);
     setSyncFeedback('⏳ Fetching latest data from Supabase...');
-    await dataStore.syncWithSupabase();
+    const sync = await dataStore.syncWithSupabase(true);
     refreshAll();
     setIsSyncingSupabase(false);
-    setSyncFeedback('✅ Sync complete! Latest profiles, customers, and history loaded.');
+    setSyncFeedback(
+      sync.errors.length > 0
+        ? `⚠️ Sync issues: ${sync.errors.join(' | ')}`
+        : `✅ Sync complete! ${sync.customersLoaded ?? 0} customers loaded from Supabase.`
+    );
   };
 
   const refreshAll = () => {
@@ -251,12 +255,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
 
     try {
       const result = await dataStore.importBulkData(uploadFile.name, parsedRows);
-      setUploadMessage(
-        `✅ Successfully imported ${result.newRows} new customers (${result.duplicate} duplicates skipped, ${result.invalid} invalid rows skipped).`
-      );
-      setUploadPreview(null);
-      setUploadFile(null);
-      setParsedRows([]);
+      if (result.error) {
+        setUploadMessage(
+          `❌ ${result.error} — saved ${result.newRows} in Supabase, ${result.failed} NOT saved. File dobara upload karein (duplicates skip ho jaate hain).`
+        );
+      } else {
+        setUploadMessage(
+          `✅ ${result.newRows} new customers Supabase me save hue (${result.duplicate} duplicates skipped, ${result.invalid} invalid rows skipped).`
+        );
+        setUploadPreview(null);
+        setUploadFile(null);
+        setParsedRows([]);
+      }
       refreshAll();
     } catch (err: any) {
       setUploadMessage('⚠️ Import error: ' + err?.message);
@@ -320,12 +330,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
     e.preventDefault();
     if (!editCustModal) return;
 
-    await dataStore.updateCustomer(editCustModal.id, {
+    const okEdit = await dataStore.updateCustomer(editCustModal.id, {
       customer_name: editCustModal.customer_name,
       matching_number: editCustModal.matching_number,
       matching_number_2: editCustModal.matching_number_2,
       status: editCustModal.status,
     });
+    if (!okEdit) {
+      window.alert('❌ Customer update Supabase me save nahi hua.');
+      return;
+    }
 
     setEditCustModal(null);
     refreshAll();
@@ -334,7 +348,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
   // --- DELETE CUSTOMER ---
   const handleConfirmDelete = async () => {
     if (!deleteCustModal) return;
-    await dataStore.deleteCustomer(deleteCustModal.id);
+    const okDel = await dataStore.deleteCustomer(deleteCustModal.id);
+    if (!okDel) {
+      window.alert('❌ Customer Supabase se delete nahi hua.');
+      return;
+    }
     setDeleteCustModal(null);
     refreshAll();
   };
