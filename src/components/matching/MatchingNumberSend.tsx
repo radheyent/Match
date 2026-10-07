@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Customer, UserProfile } from '../../types';
+import { Customer, PullHistory, UserProfile } from '../../types';
 import { dataStore } from '../../lib/dataStore';
 import { NumberCard } from '../NumberCard';
 
@@ -18,15 +18,17 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
   const [newlyPulled, setNewlyPulled] = useState<Customer[]>([]);
 
   // Recent Data state: only the user's last pulled lot, plus which ones are already sent
-  const [recentCustomers, setRecentCustomers] = useState<Customer[]>([]);
-  const [sentIds, setSentIds] = useState<Set<string>>(new Set());
+  const [recentCustomers, setRecentCustomers] = useState<PullHistory[]>([]);
+  const [sentIds, setSentIds] = useState<Set<string>>(new Set()); // sent customer numbers
+  const [pullWarning, setPullWarning] = useState<string>('');
 
   // Quota info
   const [quotaStats, setQuotaStats] = useState(dataStore.getUserPullStats(currentUser.id));
 
   const refreshRecent = () => {
-    setRecentCustomers(dataStore.getUserLastLot(currentUser.id));
-    setSentIds(dataStore.getSentCustomerIds(currentUser.id));
+    const lots = dataStore.getUserPullLots(currentUser.id, 50);
+    setRecentCustomers(lots.length > 0 ? lots[0].items : []);
+    setSentIds(dataStore.getSentNumbers(currentUser.id));
     setQuotaStats(dataStore.getUserPullStats(currentUser.id));
   };
 
@@ -41,6 +43,7 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
   const handlePullNewCustomer = async () => {
     setIsPulling(true);
     setPullError('');
+    setPullWarning('');
 
     try {
       const res = await dataStore.allocateCustomers(currentUser.id, pullCount, 'MATCHING_SEND');
@@ -50,6 +53,7 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
       }
 
       setNewlyPulled(res.customers);
+      if (res.warning) setPullWarning(res.warning);
       refreshRecent();
     } catch (err: any) {
       setPullError(err?.message || 'Error executing atomic allocation.');
@@ -205,6 +209,12 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
             </div>
           )}
 
+          {pullWarning && (
+            <div className="p-3.5 rounded-xl text-xs text-amber-300 bg-amber-950/30 border-l-4 border-amber-500 leading-relaxed">
+              ⚠️ {pullWarning}
+            </div>
+          )}
+
           {/* Render newly pulled customer cards */}
           {newlyPulled.length > 0 && (
             <div className="mt-6 pt-5 border-t border-[var(--rim)] space-y-3">
@@ -232,7 +242,7 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
                     tagLabel="⚡ New Pull"
                     tagClass="bg-emerald-950/40 text-emerald-400 border-emerald-800/40"
                     hideAfterSend
-                    alreadySent={sentIds.has(cust.id)}
+                    alreadySent={sentIds.has(cust.customer_number)}
                   />
                 ))}
               </div>
@@ -252,7 +262,7 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
               </p>
             </div>
             <span className="text-xs font-mono text-[var(--gold-lt)] font-semibold">
-              {recentCustomers.filter(c => !sentIds.has(c.id)).length} / {recentCustomers.length} left to send
+              {recentCustomers.filter(c => !sentIds.has(c.customer_number)).length} / {recentCustomers.length} left to send
             </span>
           </div>
 
@@ -269,7 +279,7 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
               {recentCustomers.map(cust => (
                 <NumberCard
                   key={cust.id}
-                  customerId={cust.id}
+                  customerId={cust.customer_id || undefined}
                   customerNumber={cust.customer_number}
                   matches={
                     cust.matching_number_2
@@ -280,7 +290,7 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
                   tagLabel="📜 Pulled Data"
                   tagClass="bg-amber-950/40 text-amber-300 border-amber-800/40"
                   hideAfterSend
-                  alreadySent={sentIds.has(cust.id)}
+                  alreadySent={sentIds.has(cust.customer_number)}
                 />
               ))}
             </div>
