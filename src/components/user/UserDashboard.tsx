@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { UserProfile, PullHistory, SendHistory } from '../../types';
+import { UserProfile, PullLot, SendHistory } from '../../types';
+import { NumberCard } from '../NumberCard';
 import { dataStore } from '../../lib/dataStore';
 import { MatchingNumberSend } from '../matching/MatchingNumberSend';
 import { SingleMatch } from '../matching/SingleMatch';
@@ -21,19 +22,16 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
       ? dataStore.getUserPullStats(currentUser.id)
       : { pulledToday: 0, remainingQuota: 0, dailyLimit: 0, perPullLimit: 0, totalPulled: 0 }
   );
-  const [history, setHistory] = useState<PullHistory[]>([]);
+  const [lots, setLots] = useState<PullLot[]>([]);
+  const [sentNumbers, setSentNumbers] = useState<Set<string>>(new Set());
+  const [openLots, setOpenLots] = useState<Set<string>>(new Set());
   const [sendHistory, setSendHistory] = useState<SendHistory[]>([]);
 
   const refreshData = () => {
     if (currentUser) {
       setStats(dataStore.getUserPullStats(currentUser.id));
-      const allPulls = dataStore.getPullHistory();
-      setHistory(
-        allPulls
-          .filter(p => p.user_id === currentUser.id)
-          .sort((a, b) => new Date(b.pulled_at).getTime() - new Date(a.pulled_at).getTime())
-          .slice(0, 50)
-      );
+      setLots(dataStore.getUserPullLots(currentUser.id, 50));
+      setSentNumbers(dataStore.getSentNumbers(currentUser.id));
       setSendHistory(
         dataStore
           .getSendHistory()
@@ -204,46 +202,80 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ currentUser, onReq
         {activeTab === 'check' && <PositionMatch />}
         {activeTab === 'history' && currentUser && (
           <div className="space-y-4">
-            {/* Pulled history (last 50) */}
+            {/* Pulled history (last 50 numbers) grouped into bunches */}
             <div className="p-4 sm:p-5 rounded-2xl border border-[var(--rim)] bg-[var(--card)] shadow-md">
               <div className="flex items-center justify-between mb-4">
                 <div>
                   <h3 className="text-sm font-bold text-[var(--txt)]">📥 Pulled History</h3>
-                  <p className="text-xs text-[var(--txt3)]">Your last 50 pulled numbers</p>
+                  <p className="text-xs text-[var(--txt3)]">
+                    Your last 50 pulled numbers, grouped by pull. Open a bunch to send.
+                  </p>
                 </div>
                 <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-medium bg-[rgba(201,147,42,0.1)] text-[var(--gold-lt)] border border-[rgba(201,147,42,0.3)]">
-                  {history.length} records
+                  {lots.reduce((n, l) => n + l.items.length, 0)} numbers
                 </span>
               </div>
 
-              {history.length === 0 ? (
+              {lots.length === 0 ? (
                 <div className="py-8 text-center text-xs text-[var(--txt3)]">
                   📭 No pulled numbers yet.
                 </div>
               ) : (
-                <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-                  {history.map(item => (
-                    <div
-                      key={item.id}
-                      className="flex items-center justify-between gap-3 p-3 rounded-xl border border-[var(--rim)] bg-[var(--inp-bg)]"
-                    >
-                      <div className="min-w-0">
-                        <div className="font-mono text-sm font-bold text-[var(--txt)] tracking-wider">
-                          {item.customer_number}
-                        </div>
-                        <div className="text-[11px] font-mono text-[var(--txt3)] truncate">
-                          ↔{' '}
-                          {item.matching_number_2
-                            ? `${item.matching_number} & ${item.matching_number_2}`
-                            : item.matching_number}
-                          {item.customer_name ? ` • ${item.customer_name}` : ''}
-                        </div>
+                <div className="space-y-2.5 max-h-[32rem] overflow-y-auto pr-1">
+                  {lots.map((lot, idx) => {
+                    const isOpen = openLots.has(lot.key) || (idx === 0 && !openLots.has('closed-' + lot.key));
+                    const left = lot.items.filter(i => !sentNumbers.has(i.customer_number)).length;
+                    return (
+                      <div key={lot.key} className="rounded-xl border border-[var(--rim)] bg-[var(--inp-bg)]">
+                        <button
+                          onClick={() => {
+                            const next = new Set(openLots);
+                            if (isOpen) {
+                              next.delete(lot.key);
+                              next.add('closed-' + lot.key);
+                            } else {
+                              next.add(lot.key);
+                              next.delete('closed-' + lot.key);
+                            }
+                            setOpenLots(next);
+                          }}
+                          className="w-full flex items-center justify-between gap-3 p-3 text-left cursor-pointer"
+                        >
+                          <div>
+                            <div className="text-xs font-bold text-[var(--txt)]">
+                              {idx === 0 ? '🆕 Latest bunch' : '📦 Bunch'} • {lot.items.length} numbers
+                            </div>
+                            <div className="text-[10px] font-mono text-[var(--txt3)]">
+                              {new Date(lot.pulled_at).toLocaleString()} • {left} left to send
+                            </div>
+                          </div>
+                          <span className="text-xs text-[var(--gold-lt)]">{isOpen ? '▲' : '▼'}</span>
+                        </button>
+
+                        {isOpen && (
+                          <div className="p-3 pt-0 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            {lot.items.map(item => (
+                              <NumberCard
+                                key={item.id}
+                                customerId={item.customer_id || undefined}
+                                customerNumber={item.customer_number}
+                                matches={
+                                  item.matching_number_2
+                                    ? [item.matching_number, item.matching_number_2]
+                                    : [item.matching_number]
+                                }
+                                customerName={item.customer_name}
+                                tagLabel="📜 Pulled"
+                                tagClass="bg-blue-950/40 text-blue-300 border-blue-800/40"
+                                hideAfterSend
+                                alreadySent={sentNumbers.has(item.customer_number)}
+                              />
+                            ))}
+                          </div>
+                        )}
                       </div>
-                      <span className="text-[10px] font-mono text-[var(--txt3)] shrink-0">
-                        {new Date(item.pulled_at).toLocaleString()}
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
