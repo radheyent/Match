@@ -85,86 +85,46 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
   // Choose between "Recent Pulled Data" or "New Customer"
   return (
     <div className="space-y-6">
-      {/* Top Header / Verified User Bar */}
-      <div className="p-4 rounded-2xl border border-[var(--rim)] bg-[var(--card)] flex flex-wrap items-center justify-between gap-3 shadow-md">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[var(--violet)] to-[var(--rose)] flex items-center justify-center text-white font-bold text-sm shadow">
-            {currentUser.name.charAt(0).toUpperCase()}
-          </div>
-          <div>
-            <div className="text-sm font-bold text-[var(--txt)] flex items-center gap-2">
-              <span>{currentUser.name}</span>
-              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950/40 text-emerald-400 border border-emerald-800/40">
-                Verified
-              </span>
-            </div>
-            <div className="text-xs text-[var(--txt3)] font-mono">
-              Today's quota: {quotaStats.pulledToday} / {quotaStats.dailyLimit} pulled •{' '}
-              <strong className="text-[var(--gold-lt)]">{quotaStats.remainingQuota} remaining</strong>
-            </div>
-          </div>
+      {/* User bar */}
+      <div className="flex items-center gap-2.5">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[var(--violet)] to-[var(--rose)] flex items-center justify-center text-white font-bold text-xs shadow">
+          {currentUser.name.charAt(0).toUpperCase()}
         </div>
-
+        <span className="text-sm font-bold text-[var(--txt)]">{currentUser.name}</span>
       </div>
 
-      {/* Two Prominent Action Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Option 1: Recent Pulled Data */}
-        <div
+      {/* Two small chips, side by side */}
+      <div className="grid grid-cols-2 gap-2">
+        <button
           onClick={() => {
             setSelectedMode('recent');
             setNewlyPulled([]);
             refreshRecent();
           }}
-          className={`p-6 rounded-2xl border transition-all cursor-pointer ${
+          className={`px-3 py-2 rounded-xl border text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
             selectedMode === 'recent'
-              ? 'border-[var(--gold)] bg-[rgba(201,147,42,0.08)] shadow-lg ring-1 ring-[var(--gold)]'
-              : 'border-[var(--rim)] bg-[var(--card)] hover:border-[rgba(201,147,42,0.3)] hover:bg-[var(--card-hi)]'
+              ? 'border-[var(--gold)] bg-[rgba(201,147,42,0.1)] text-[var(--gold-lt)] ring-1 ring-[var(--gold)]'
+              : 'border-[var(--rim)] bg-[var(--card)] text-[var(--txt2)] hover:border-[rgba(201,147,42,0.3)]'
           }`}
         >
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-2xl">📜</span>
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-mono bg-white/5 border border-[var(--rim)] text-[var(--txt2)]">
-              {recentCustomers.length} on record
-            </span>
-          </div>
-          <h4 className="text-base font-bold text-[var(--txt)] mb-1">Recent Pulled Data</h4>
-          <p className="text-xs text-[var(--txt2)] leading-relaxed">
-            Your last pulled lot, ready to send. It stays here until you pull new data.
-          </p>
-          <div className="mt-4 flex items-center gap-1.5 text-xs font-semibold text-[var(--gold-lt)]">
-            <span>Open Recent List</span>
-            <span>→</span>
-          </div>
-        </div>
+          <span>📜</span>
+          <span>Recent Pulled Data</span>
+          <span className="px-1.5 rounded-full text-[10px] font-mono bg-white/10">
+            {recentCustomers.length}
+          </span>
+        </button>
 
-        {/* Option 2: New Customer */}
-        <div
-          onClick={() => {
-            setSelectedMode('new');
-          }}
-          className={`p-6 rounded-2xl border transition-all cursor-pointer ${
+        <button
+          onClick={() => setSelectedMode('new')}
+          className={`px-3 py-2 rounded-xl border text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
             selectedMode === 'new'
-              ? 'border-[var(--violet-lt)] bg-[rgba(123,63,228,0.08)] shadow-lg ring-1 ring-[var(--violet-lt)]'
-              : 'border-[var(--rim)] bg-[var(--card)] hover:border-[rgba(123,63,228,0.3)] hover:bg-[var(--card-hi)]'
+              ? 'border-[var(--violet-lt)] bg-[rgba(123,63,228,0.1)] text-[var(--violet-lt)] ring-1 ring-[var(--violet-lt)]'
+              : 'border-[var(--rim)] bg-[var(--card)] text-[var(--txt2)] hover:border-[rgba(123,63,228,0.3)]'
           }`}
         >
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-2xl">⚡</span>
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-mono bg-emerald-950/30 border border-emerald-800/40 text-emerald-400">
-              Max {quotaStats.perPullLimit} per pull
-            </span>
-          </div>
-          <h4 className="text-base font-bold text-[var(--txt)] mb-1">New Customer</h4>
-          <p className="text-xs text-[var(--txt2)] leading-relaxed">
-            Pull a fresh, unallocated customer from CPOS database and instantly generate the matching
-            message.
-          </p>
-          <div className="mt-4 flex items-center gap-1.5 text-xs font-semibold text-[var(--violet-lt)]">
-            <span>Pull Fresh Customer</span>
-            <span>→</span>
-          </div>
-        </div>
+          <span>⚡</span>
+          <span>New Customers</span>
+        </button>
       </div>
 
       {/* --- SUBVIEW: NEW CUSTOMER PULL --- */}
@@ -173,9 +133,6 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
           <div className="flex items-center justify-between border-b border-[var(--rim)] pb-3">
             <div>
               <h4 className="text-sm font-bold text-[var(--txt)]">⚡ Pull New Available Customer</h4>
-              <p className="text-xs text-[var(--txt3)]">
-                Atomic database locking ensures no duplicate customer is ever pulled twice.
-              </p>
             </div>
             <span className="text-xs font-mono text-[var(--gold-lt)] font-semibold">
               Remaining Quota: {quotaStats.remainingQuota}
@@ -242,9 +199,6 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
                 <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
                   <span>✅</span> Successfully Allocated ({newlyPulled.length})
                 </span>
-                <span className="text-xs text-[var(--txt3)] font-mono">
-                  Ready to send via WhatsApp / RCS
-                </span>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -279,9 +233,6 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
               <h4 className="text-sm font-bold text-[var(--txt)]">
                 📜 Recent Pulled Data{recentTime ? ` • ${new Date(recentTime).toLocaleString()}` : ''}
               </h4>
-              <p className="text-xs text-[var(--txt3)]">
-                Send from here. Sent numbers show ✅ and the buttons are hidden.
-              </p>
             </div>
             <span className="text-xs font-mono text-[var(--gold-lt)] font-semibold">
               {recentCustomers.filter(c => !sentIds.has(c.customer_number)).length} / {recentCustomers.length} left to send
@@ -293,7 +244,7 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
               <div className="text-3xl">📭</div>
               <div className="text-sm">No pulled data yet.</div>
               <p className="text-xs text-[var(--txt3)]">
-                Click "New Customer" above to pull your first lot!
+                Tap "New Customers" to pull.
               </p>
             </div>
           ) : (
