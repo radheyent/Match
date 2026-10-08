@@ -19,6 +19,9 @@ Vi aapke liye ek Matching Premium Number ZERO Price par laaya hai ✨
 📞 8377919293 
 👉 https://wa.me/918377919293?text=Yes`;
 
+// Number written in the default message ("Reply now Yes"). Each agent can replace it with their own.
+export const DEFAULT_REPLY_NUMBER = '8377919293';
+
 // Fixed UUID so the master admin can live in the Supabase `profiles` table (id is a UUID column)
 export const ADMIN_PROFILE_ID = '00000000-0000-0000-0000-000000000001';
 export const LEGACY_ADMIN_PROFILE_ID = 'user-admin-master';

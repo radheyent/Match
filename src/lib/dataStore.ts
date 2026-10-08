@@ -8,7 +8,7 @@ import {
   AllocationResult,
   PullLot,
 } from '../types';
-import { DEF_FMT } from './constants';
+import { DEF_FMT, DEFAULT_REPLY_NUMBER } from './constants';
 import { api, ApiError, loadSession, saveSession, clearSession } from './api';
 
 // Everything (profiles, customers, pulls, uploads, template, audit) is stored in Supabase and
@@ -555,8 +555,30 @@ class DataStore {
   }
 
   // ------------------------------------------------------------ template
+  // The template for the logged-in agent: the default reply number is swapped for the agent's own
   public getActiveTemplate(): string {
-    return this.template || DEF_FMT;
+    const base = this.template || DEF_FMT;
+    const mine = this.activeUser?.role === 'user' ? this.activeUser.reply_number : null;
+    return mine ? base.split(DEFAULT_REPLY_NUMBER).join(mine) : base;
+  }
+
+  public getReplyNumber(): string {
+    return (this.activeUser?.role === 'user' && this.activeUser.reply_number) || DEFAULT_REPLY_NUMBER;
+  }
+
+  // Saved in Supabase on the agent's profile (empty string = use the default number again)
+  public async setReplyNumber(number: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      const r = await api<{ profile: UserProfile }>('set-reply-number', { number });
+      this.activeUser = r.profile;
+      this.profiles = this.profiles.map(p => (p.id === r.profile.id ? r.profile : p));
+      const s = loadSession();
+      if (s) saveSession(s.token, r.profile, this.tzOffsetMinutes);
+      this.notify();
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: errMsg(e) };
+    }
   }
 
   public async saveTemplate(newTemplate: string): Promise<boolean> {
