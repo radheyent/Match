@@ -39,6 +39,12 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
   const [recentCustomers, setRecentCustomers] = useState<PullHistory[]>([]);
   const [sentIds, setSentIds] = useState<Set<string>>(new Set()); // sent customer numbers
   const [recentTime, setRecentTime] = useState<string>('');
+  // "Number Change": reply number used in this agent's message
+  const [editingNumber, setEditingNumber] = useState<boolean>(false);
+  const [numberInput, setNumberInput] = useState<string>('');
+  const [numberError, setNumberError] = useState<string>('');
+  const [numberSaving, setNumberSaving] = useState<boolean>(false);
+  const [numberSaved, setNumberSaved] = useState<boolean>(false);
   const [pullWarning, setPullWarning] = useState<string>('');
 
   // Quota info
@@ -59,6 +65,20 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
     const unsubscribe = dataStore.subscribe(refreshRecent);
     return () => unsubscribe();
   }, [currentUser.id]);
+
+  const handleSaveNumber = async () => {
+    setNumberSaving(true);
+    setNumberError('');
+    const res = await dataStore.setReplyNumber(numberInput);
+    setNumberSaving(false);
+    if (!res.success) {
+      setNumberError(res.error || 'Save failed.');
+      return;
+    }
+    setEditingNumber(false);
+    setNumberSaved(true);
+    setTimeout(() => setNumberSaved(false), 2000);
+  };
 
   const handlePullNewCustomer = async () => {
     setIsPulling(true);
@@ -85,13 +105,60 @@ export const MatchingNumberSend: React.FC<MatchingNumberSendProps> = ({ currentU
   // Choose between "Recent Pulled Data" or "New Customer"
   return (
     <div className="space-y-6">
-      {/* User bar */}
-      <div className="flex items-center gap-2.5">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[var(--violet)] to-[var(--rose)] flex items-center justify-center text-white font-bold text-xs shadow">
-          {currentUser.name.charAt(0).toUpperCase()}
+      {/* User bar + Number Change */}
+      {editingNumber ? (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <input
+              type="tel"
+              inputMode="numeric"
+              autoFocus
+              maxLength={13}
+              value={numberInput}
+              onChange={e => setNumberInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') handleSaveNumber();
+              }}
+              placeholder={dataStore.getReplyNumber()}
+              className="flex-1 min-w-0 px-3 py-1.5 rounded-lg border border-[var(--rim)] bg-[var(--inp-bg)] text-[var(--txt)] text-sm font-mono outline-none focus:border-[var(--gold)]"
+            />
+            <button
+              onClick={handleSaveNumber}
+              disabled={numberSaving}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-[var(--violet)] to-[var(--rose)] disabled:opacity-50 cursor-pointer"
+            >
+              {numberSaving ? '...' : 'Save'}
+            </button>
+            <button
+              onClick={() => {
+                setEditingNumber(false);
+                setNumberError('');
+              }}
+              className="px-2.5 py-1.5 rounded-lg text-xs border border-[var(--rim)] text-[var(--txt3)] cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+          {numberError && <div className="text-[11px] text-rose-400">{numberError}</div>}
         </div>
-        <span className="text-sm font-bold text-[var(--txt)]">{currentUser.name}</span>
-      </div>
+      ) : (
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[var(--violet)] to-[var(--rose)] flex items-center justify-center text-white font-bold text-xs shadow shrink-0">
+            {currentUser.name.charAt(0).toUpperCase()}
+          </div>
+          <span className="text-sm font-bold text-[var(--txt)] truncate">{currentUser.name}</span>
+          <button
+            onClick={() => {
+              setNumberInput(currentUser.reply_number || '');
+              setNumberError('');
+              setEditingNumber(true);
+            }}
+            className="ml-auto shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-semibold border border-[var(--rim)] text-[var(--gold-lt)] hover:bg-white/5 cursor-pointer"
+          >
+            {numberSaved ? '✅ Saved' : '📞 Number Change'}
+          </button>
+        </div>
+      )}
 
       {/* Two small chips, side by side */}
       <div className="grid grid-cols-2 gap-2">
