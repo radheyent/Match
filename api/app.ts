@@ -283,6 +283,28 @@ const authedActions: Record<string, (c: Ctx, who: TokenPayload) => Promise<any>>
     return { profile, template, history, tzOffsetMinutes: config().tzOffsetMinutes };
   },
 
+  // Agent sets the reply number used in HIS outreach message (empty = back to default)
+  async 'set-reply-number'({ body }, who) {
+    if (who.role !== 'user') throw new HttpError(403, 'Only agents can set a reply number.');
+    const raw = digits(body.number);
+    const num = raw.length === 12 && raw.startsWith('91') ? raw.slice(2) : raw;
+    if (num && num.length !== 10) throw new HttpError(400, 'Number must be exactly 10 digits.');
+    const { data, error } = await db()
+      .from('profiles')
+      .update({ reply_number: num || null, updated_at: new Date().toISOString() })
+      .eq('id', who.sub)
+      .select()
+      .maybeSingle();
+    if (error) {
+      if (/reply_number/i.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204') {
+        throw new HttpError(500, 'Database setup pending: run supabase-reply-number.sql in Supabase SQL Editor.');
+      }
+      fail(error, 'Save failed');
+    }
+    if (!data) throw new HttpError(404, 'Account no longer exists.');
+    return { profile: data };
+  },
+
   // Atomic pull: only the database function hands out customers
   async pull({ body }, who) {
     if (who.role !== 'user') throw new HttpError(403, 'Only agents can pull customers.');
