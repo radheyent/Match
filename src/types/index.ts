@@ -10,6 +10,7 @@ export interface UserProfile {
   status: UserStatus;
   daily_pull_limit: number;
   per_pull_limit: number;
+  reply_number?: string | null; // number shown in the outreach message (per agent)
   created_at?: string;
   updated_at?: string;
 }
