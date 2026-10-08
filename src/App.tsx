@@ -6,7 +6,6 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile } from './types';
 import { dataStore } from './lib/dataStore';
-import { ADMIN_PROFILE_ID } from './lib/constants';
 import { Navbar } from './components/Navbar';
 import { UserDashboard } from './components/user/UserDashboard';
 import { AdminDashboard } from './components/admin/AdminDashboard';
@@ -17,7 +16,9 @@ import { AgentLoginModal } from './components/auth/AgentLoginModal';
 export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(dataStore.getActiveUser());
   const [activeView, setActiveView] = useState<'user' | 'admin'>('user');
-  const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(false);
+  const [isAdminUnlocked, setIsAdminUnlocked] = useState<boolean>(
+    dataStore.getActiveUser()?.role === 'admin'
+  );
   const [showAdminPwModal, setShowAdminPwModal] = useState<boolean>(false);
   const [showAgentLoginModal, setShowAgentLoginModal] = useState<boolean>(false);
 
@@ -25,6 +26,10 @@ export default function App() {
     const handleUpdate = () => {
       const active = dataStore.getActiveUser();
       setCurrentUser(active ? { ...active } : null);
+      // keep admin lock state in sync with the server session (e.g. session expired)
+      const isAdmin = active?.role === 'admin';
+      setIsAdminUnlocked(isAdmin);
+      if (!isAdmin) setActiveView('user');
     };
 
     const unsub = dataStore.subscribe(handleUpdate);
@@ -39,26 +44,12 @@ export default function App() {
     }
   };
 
-  const handleAdminPasswordSuccess = async () => {
+  // AdminPasswordModal has already verified the password on the server and loaded the data
+  const handleAdminPasswordSuccess = () => {
+    const admin = dataStore.getActiveUser();
     setIsAdminUnlocked(true);
     setShowAdminPwModal(false);
-
-    // Pull the latest admin + user profiles from Supabase before opening the dashboard
-    await dataStore.syncWithSupabase(true);
-
-    // Primary admin session
-    const adminProfile = dataStore.getProfiles().find(p => p.role === 'admin') || {
-      id: ADMIN_PROFILE_ID,
-      name: 'Administrator',
-      email: 'admin@vi-outreach.com',
-      role: 'admin' as const,
-      status: 'active' as const,
-      daily_pull_limit: 1000,
-      per_pull_limit: 100,
-    };
-
-    dataStore.setActiveUser(adminProfile.id);
-    setCurrentUser({ ...adminProfile });
+    setCurrentUser(admin ? { ...admin } : null);
     setActiveView('admin');
   };
 
@@ -129,7 +120,7 @@ export default function App() {
         <Footer onAdminAccessGranted={handleRequestAdminView} />
       </main>
 
-      {/* Admin Password Gate Modal (Strictly 'Ricky@1212') */}
+      {/* Admin Password Gate Modal (password is verified on the server) */}
       <AdminPasswordModal
         isOpen={showAdminPwModal}
         onSuccess={handleAdminPasswordSuccess}

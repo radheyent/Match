@@ -1,12 +1,11 @@
 import React, { useState } from 'react';
+import { dataStore } from '../../lib/dataStore';
 
 interface AdminPasswordModalProps {
   isOpen: boolean;
   onSuccess: () => void;
   onCancel: () => void;
 }
-
-const ADMIN_PASSWORD = 'Ricky@1212';
 
 export const AdminPasswordModal: React.FC<AdminPasswordModalProps> = ({
   isOpen,
@@ -16,18 +15,23 @@ export const AdminPasswordModal: React.FC<AdminPasswordModalProps> = ({
   const [password, setPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
+  const [loading, setLoading] = useState<boolean>(false);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // The password is checked on the server; the browser never sees it
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (password === ADMIN_PASSWORD) {
+    if (!password || loading) return;
+    setLoading(true);
+    const res = await dataStore.loginAdmin(password);
+    setLoading(false);
+    setPassword('');
+    if (res.success) {
       setError('');
-      setPassword('');
       onSuccess();
     } else {
-      setError('❌ Incorrect password. Access denied.');
-      setPassword('');
+      setError(`❌ ${res.error || 'Incorrect password. Access denied.'}`);
     }
   };
 
@@ -91,9 +95,10 @@ export const AdminPasswordModal: React.FC<AdminPasswordModalProps> = ({
             </button>
             <button
               type="submit"
+              disabled={loading}
               className="flex-[2] py-3 rounded-xl bg-gradient-to-r from-[#7A4A0A] to-[var(--gold)] font-bold text-xs text-[var(--ink)] hover:opacity-95 shadow-lg cursor-pointer transition-opacity"
             >
-              🔓 Unlock Admin
+              {loading ? '⏳ Checking...' : '🔓 Unlock Admin'}
             </button>
           </div>
         </form>

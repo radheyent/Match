@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { Customer, UserProfile, UploadHistory, PullHistory, AuditLog } from '../../types';
 import { dataStore } from '../../lib/dataStore';
-import { getSupabaseStatus, saveCustomSupabaseConfig } from '../../lib/supabaseClient';
 
 interface AdminDashboardProps {
   currentUser: UserProfile;
@@ -70,30 +69,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
   const [showTemplatePreview, setShowTemplatePreview] = useState<boolean>(true);
 
   // Supabase Copy & Live Sync State
-  const [isSqlCopied, setIsSqlCopied] = useState<boolean>(false);
-  const [customUrl, setCustomUrl] = useState<string>(
-    localStorage.getItem('vi_custom_supabase_url') || ''
-  );
-  const [customKey, setCustomKey] = useState<string>(
-    localStorage.getItem('vi_custom_supabase_anon_key') || ''
-  );
   const [syncFeedback, setSyncFeedback] = useState<string>('');
   const [isSyncingSupabase, setIsSyncingSupabase] = useState<boolean>(false);
-
-  const handleSaveSupabaseConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!customUrl.trim() || !customKey.trim()) {
-      setSyncFeedback('⚠️ Please enter both Supabase URL and Anon Key.');
-      return;
-    }
-    setIsSyncingSupabase(true);
-    setSyncFeedback('⏳ Connecting and synchronizing with Supabase...');
-    saveCustomSupabaseConfig(customUrl.trim(), customKey.trim());
-    await dataStore.syncWithSupabase();
-    refreshAll();
-    setIsSyncingSupabase(false);
-    setSyncFeedback('✅ Successfully connected to Supabase! Live database in sync.');
-  };
 
   const handleManualSync = async () => {
     setIsSyncingSupabase(true);
@@ -431,17 +408,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser: _cu
     }
   };
 
-  const handleCopySchemaSql = () => {
-    const sql = `-- Vi Premium Outreach Database Schema
--- Run this in Supabase SQL Editor:
--- (Full schema is saved in /supabase-schema.sql)
-SELECT 'Schema loaded successfully' AS result;`;
-    navigator.clipboard.writeText(sql);
-    setIsSqlCopied(true);
-    setTimeout(() => setIsSqlCopied(false), 2000);
-  };
-
-  const supabaseStatus = getSupabaseStatus();
 
   return (
     <div className="space-y-6">
@@ -1286,115 +1252,69 @@ SELECT 'Schema loaded successfully' AS result;`;
         </div>
       )}
 
-      {/* --- TAB 7: SUPABASE & DEPLOYMENT CONFIG --- */}
+      {/* --- TAB 7: SECURE SERVER & DATABASE STATUS --- */}
       {activeTab === 'supabase' && (
         <div className="space-y-5">
           <div className="p-6 rounded-2xl border border-[var(--rim)] bg-[var(--card)] shadow-md space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
               <div>
-                <h3 className="text-base font-bold text-[var(--txt)]">🔌 Supabase & Vercel Deployment</h3>
+                <h3 className="text-base font-bold text-[var(--txt)]">🔐 Secure Server & Database</h3>
                 <p className="text-xs text-[var(--txt3)]">
-                  Seamlessly connect external Cloud Supabase PostgreSQL or run with built-in engine
+                  All data is stored in Supabase and reached only through the secure server.
                 </p>
               </div>
-              <span
-                className={`px-3 py-1 rounded-full text-xs font-mono font-bold border ${
-                  supabaseStatus.isConfigured
-                    ? 'bg-emerald-950/40 text-emerald-400 border-emerald-800/40'
-                    : 'bg-amber-950/40 text-amber-300 border-amber-800/40'
-                }`}
-              >
-                {supabaseStatus.isConfigured ? 'Connected to Cloud Supabase' : 'Built-in Atomic Engine Active'}
+              <span className="px-3 py-1 rounded-full text-xs font-mono font-bold border bg-emerald-950/40 text-emerald-400 border-emerald-800/40">
+                Admin session active
               </span>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div className="p-3.5 rounded-xl border border-[var(--rim)] bg-[var(--panel)]">
-                <span className="text-[var(--txt3)]">Supabase Project URL:</span>
-                <div className="font-mono font-semibold text-[var(--txt)] mt-1 truncate">
-                  {supabaseStatus.url}
-                </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+              <div className="p-3 rounded-xl border border-[var(--rim)] bg-[var(--panel)]">
+                <div className="text-[var(--txt3)]">Customers</div>
+                <div className="font-mono font-bold text-[var(--txt)] text-lg">{counts.total}</div>
               </div>
-              <div className="p-3.5 rounded-xl border border-[var(--rim)] bg-[var(--panel)]">
-                <span className="text-[var(--txt3)]">Anon Key Configured:</span>
-                <div className="font-mono font-semibold text-[var(--txt)] mt-1">
-                  {supabaseStatus.hasAnonKey ? '✅ Present & Connected' : '❌ Not Provided'}
-                </div>
+              <div className="p-3 rounded-xl border border-[var(--rim)] bg-[var(--panel)]">
+                <div className="text-[var(--txt3)]">Available</div>
+                <div className="font-mono font-bold text-emerald-400 text-lg">{counts.available}</div>
+              </div>
+              <div className="p-3 rounded-xl border border-[var(--rim)] bg-[var(--panel)]">
+                <div className="text-[var(--txt3)]">Pulled</div>
+                <div className="font-mono font-bold text-[var(--gold-lt)] text-lg">{counts.pulled}</div>
+              </div>
+              <div className="p-3 rounded-xl border border-[var(--rim)] bg-[var(--panel)]">
+                <div className="text-[var(--txt3)]">Users</div>
+                <div className="font-mono font-bold text-[var(--txt)] text-lg">{profiles.length}</div>
               </div>
             </div>
 
-            {/* Live Credentials Manager */}
-            <form onSubmit={handleSaveSupabaseConfig} className="p-4 rounded-xl border border-[var(--rim)] bg-[var(--panel)] space-y-3">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-bold text-[var(--txt)] uppercase tracking-wider font-mono">
-                  Live Supabase Credentials & Instant Sync
-                </h4>
-                <button
-                  type="button"
-                  onClick={handleManualSync}
-                  disabled={isSyncingSupabase}
-                  className="px-2.5 py-1 rounded-lg border border-[var(--rim)] text-xs text-[var(--gold-lt)] hover:text-white cursor-pointer disabled:opacity-50"
-                >
-                  {isSyncingSupabase ? 'Syncing...' : '🔄 Fetch From Supabase'}
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                <div>
-                  <label className="block text-[var(--txt3)] mb-1">Project URL</label>
-                  <input
-                    type="url"
-                    placeholder="https://xyz.supabase.co"
-                    value={customUrl}
-                    onChange={e => setCustomUrl(e.target.value)}
-                    className="w-full p-2.5 rounded-lg border border-[var(--rim)] bg-[var(--inp-bg)] text-[var(--txt)] font-mono text-xs focus:outline-none focus:border-[var(--gold)]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[var(--txt3)] mb-1">Anon Public Key</label>
-                  <input
-                    type="password"
-                    placeholder="eyJhbGciOi..."
-                    value={customKey}
-                    onChange={e => setCustomKey(e.target.value)}
-                    className="w-full p-2.5 rounded-lg border border-[var(--rim)] bg-[var(--inp-bg)] text-[var(--txt)] font-mono text-xs focus:outline-none focus:border-[var(--gold)]"
-                  />
-                </div>
-              </div>
-
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleManualSync}
+                disabled={isSyncingSupabase}
+                className="px-3 py-2 rounded-lg border border-[var(--rim)] text-xs text-[var(--gold-lt)] hover:text-white cursor-pointer disabled:opacity-50"
+              >
+                {isSyncingSupabase ? 'Syncing...' : '🔄 Fetch From Supabase'}
+              </button>
               {syncFeedback && (
-                <div className="text-xs p-2 rounded-lg bg-black/20 text-[var(--gold-pale)] font-mono">
+                <div className="text-xs p-2 rounded-lg bg-black/20 text-[var(--gold-pale)] font-mono flex-1">
                   {syncFeedback}
                 </div>
               )}
+            </div>
 
-              <div className="flex justify-end pt-1">
-                <button
-                  type="submit"
-                  disabled={isSyncingSupabase}
-                  className="px-4 py-2 rounded-lg bg-gradient-to-r from-[var(--violet)] to-[var(--rose)] text-white text-xs font-bold shadow hover:opacity-95 cursor-pointer disabled:opacity-50"
-                >
-                  💾 Save & Sync Supabase Database
-                </button>
+            <div className="p-4 rounded-xl border border-[var(--gold)]/30 bg-[rgba(201,147,42,0.06)] space-y-2 text-xs text-[var(--txt2)] leading-relaxed">
+              <div className="font-bold text-[var(--gold-lt)] uppercase tracking-wider">
+                Vercel Environment Variables (server only)
               </div>
-            </form>
-
-            <div className="p-4 rounded-xl border border-[var(--gold)]/30 bg-[rgba(201,147,42,0.06)] space-y-3">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-bold text-[var(--gold-lt)] uppercase tracking-wider">
-                  PostgreSQL Schema & RPC Migration (FOR UPDATE SKIP LOCKED)
-                </h4>
-                <button
-                  onClick={handleCopySchemaSql}
-                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-[var(--gold)] text-[var(--ink)] hover:opacity-90 cursor-pointer"
-                >
-                  {isSqlCopied ? '✅ Copied SQL!' : '📋 Copy SQL Script'}
-                </button>
+              <div className="font-mono">
+                SUPABASE_URL • SUPABASE_SERVICE_ROLE_KEY • ADMIN_PASSWORD
               </div>
-              <p className="text-xs text-[var(--txt2)] leading-relaxed">
-                The complete SQL schema with <code>allocate_customers</code> stored procedure and Row Level Security
-                is saved in <code>/supabase-schema.sql</code>. Copy and run it in the Supabase SQL Editor.
-              </p>
+              <div>
+                Optional: <span className="font-mono">SESSION_SECRET</span>,{' '}
+                <span className="font-mono">TZ_OFFSET_MINUTES</span> (default 330 = IST, used for the daily quota day).
+                Never use a <span className="font-mono">VITE_</span> prefix for secrets.
+              </div>
             </div>
           </div>
         </div>

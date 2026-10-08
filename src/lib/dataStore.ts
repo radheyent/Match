@@ -3,334 +3,74 @@ import {
   Customer,
   PullHistory,
   SendHistory,
-  MessageTemplate,
   UploadHistory,
   AuditLog,
   AllocationResult,
   PullLot,
 } from '../types';
-import { DEF_FMT, INITIAL_PROFILES, ADMIN_PROFILE_ID, LEGACY_ADMIN_PROFILE_ID } from './constants';
-import { getSupabaseClient } from './supabaseClient';
+import { DEF_FMT } from './constants';
+import { api, ApiError, loadSession, saveSession, clearSession } from './api';
 
-const STORAGE_KEYS = {
-  PROFILES: 'vi_profiles_v3',
-  CUSTOMERS: 'vi_customers_v3',
-  PULL_HISTORY: 'vi_pull_history_v3',
-  SEND_HISTORY: 'vi_send_history_v3',
-  TEMPLATES: 'vi_templates_v3',
-  UPLOADS: 'vi_uploads_v3',
-  AUDIT: 'vi_audit_v3',
-  ACTIVE_USER_ID: 'vi_active_user_id_v3',
-};
+// Everything (profiles, customers, pulls, uploads, template, audit) is stored in Supabase and
+// reached ONLY through the secure server (/api/app). This store is just an in-memory view of it.
+// Only the "sent" list is kept in this browser (as requested).
+const SEND_HISTORY_KEY = 'vi_send_history_v3';
+const DEFAULT_TZ_OFFSET = 330; // IST, overridden by the server value
+
+function errMsg(e: unknown): string {
+  if (e instanceof ApiError) return e.message;
+  return e instanceof Error ? e.message : 'Unexpected error.';
+}
 
 function newUuid(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     const r = (Math.random() * 16) | 0;
     return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
   });
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Only the columns that exist in the Supabase `customers` table
-function toCustomerRow(c: Customer) {
-  return {
-    id: c.id,
-    customer_number: c.customer_number,
-    customer_name: c.customer_name ?? null,
-    matching_number: c.matching_number,
-    matching_number_2: c.matching_number_2 ?? null,
-    status: c.status,
-    uploaded_at: c.uploaded_at,
-    created_at: c.created_at,
-  };
-}
-
-function dbErrorText(err: { message?: string; code?: string } | null | undefined): string {
-  if (!err) return 'Unknown database error.';
-  return `${err.message || 'Database error'}${err.code ? ` (code ${err.code})` : ''}`;
-}
+const asHistory = (rows: any[]): PullHistory[] =>
+  (rows || []).map(r => ({ ...r, customer_id: r.customer_id || '' }));
 
 class DataStore {
   private profiles: UserProfile[] = [];
   private customers: Customer[] = [];
   private pullHistory: PullHistory[] = [];
   private sendHistory: SendHistory[] = [];
-  private templates: MessageTemplate[] = [];
   private uploadHistory: UploadHistory[] = [];
   private auditLogs: AuditLog[] = [];
+  private template: string = '';
   private activeUser: UserProfile | null = null;
+  private tzOffsetMinutes: number = DEFAULT_TZ_OFFSET;
   private listeners: Set<() => void> = new Set();
-  private allocationLock: boolean = false;
-  private isSyncing: boolean = false;
+  private syncPromise: Promise<{ customersLoaded: number | null; errors: string[] }> | null = null;
 
   constructor() {
-    this.init();
-    // Asynchronously sync with Supabase if configured
-    this.syncWithSupabase();
-  }
-
-  private init() {
     try {
-      // 1. Purge legacy demo storage keys to guarantee 100% production clean start
-      try {
-        localStorage.removeItem('vi_customers_v2');
-        localStorage.removeItem('vi_profiles_v2');
-      } catch {
-        // ignore
-      }
-
-      const storedProfiles = localStorage.getItem(STORAGE_KEYS.PROFILES);
-      if (storedProfiles) {
-        const parsed = JSON.parse(storedProfiles);
-        const cleaned = parsed
-          .map((p: UserProfile) =>
-            p.id === LEGACY_ADMIN_PROFILE_ID ? { ...p, id: ADMIN_PROFILE_ID } : p
-          )
-          .filter(
-          (p: UserProfile) =>
-            !['ramesh@vi-outreach.com', 'priya@vi-outreach.com', 'ricky@vi-outreach.com'].includes(
-              p.email
-            )
-        );
-        if (!cleaned.some((p: UserProfile) => p.role === 'admin')) {
-          cleaned.unshift(INITIAL_PROFILES[0]);
-        }
-        this.profiles = cleaned;
-      } else {
-        this.profiles = [...INITIAL_PROFILES];
-      }
-
-      // Purge any demo numbers completely
-      const storedCust = localStorage.getItem(STORAGE_KEYS.CUSTOMERS);
-      if (storedCust) {
-        const parsedCust = JSON.parse(storedCust);
-        this.customers = parsedCust.filter(
-          (c: Customer) =>
-            !c.id.startsWith('cust-10') &&
-            !c.id.startsWith('cust-11') &&
-            !c.id.startsWith('cust-12') &&
-            !['9811223344', '9876543210', '8800112233', '9999888877', '7011223344'].includes(
-              c.customer_number
-            )
-        );
-      } else {
-        this.customers = [];
-      }
-
-      const storedPull = localStorage.getItem(STORAGE_KEYS.PULL_HISTORY);
-      this.pullHistory = storedPull ? JSON.parse(storedPull) : [];
-
-      const storedSend = localStorage.getItem(STORAGE_KEYS.SEND_HISTORY);
-      this.sendHistory = storedSend ? JSON.parse(storedSend) : [];
-
-      const storedTemplates = localStorage.getItem(STORAGE_KEYS.TEMPLATES);
-      this.templates = storedTemplates
-        ? JSON.parse(storedTemplates)
-        : [
-            {
-              id: 'tmpl-default',
-              name: 'Vi Premium Default Template',
-              template: DEF_FMT,
-              is_default: true,
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            },
-          ];
-
-      const storedUploads = localStorage.getItem(STORAGE_KEYS.UPLOADS);
-      this.uploadHistory = storedUploads ? JSON.parse(storedUploads) : [];
-
-      const storedAudit = localStorage.getItem(STORAGE_KEYS.AUDIT);
-      this.auditLogs = storedAudit ? JSON.parse(storedAudit) : [];
-
-      let activeId = localStorage.getItem(STORAGE_KEYS.ACTIVE_USER_ID);
-      if (activeId === LEGACY_ADMIN_PROFILE_ID) activeId = ADMIN_PROFILE_ID;
-      this.activeUser = activeId ? this.profiles.find(p => p.id === activeId) || null : null;
-
-      this.persistAll();
+      const raw = localStorage.getItem(SEND_HISTORY_KEY);
+      this.sendHistory = raw ? JSON.parse(raw) : [];
     } catch {
-      this.profiles = [...INITIAL_PROFILES];
-      this.customers = [];
-      this.activeUser = null;
-    }
-  }
-
-  // Sync with Supabase on boot and when credentials are saved
-  public async syncWithSupabase(
-    includeCustomers: boolean = false
-  ): Promise<{ customersLoaded: number | null; errors: string[] }> {
-    const client = getSupabaseClient();
-    const errors: string[] = [];
-    if (!client) return { customersLoaded: null, errors };
-
-    // Never skip a sync (e.g. admin unlock) just because another one is still running
-    while (this.isSyncing) {
-      await new Promise(res => setTimeout(res, 50));
+      this.sendHistory = [];
     }
 
-    // Only admins need the full customer list; agents pull through the database function
-    const loadCustomers = includeCustomers || this.activeUser?.role === 'admin';
-    let customersLoaded: number | null = null;
-
-    this.isSyncing = true;
-    try {
-      // 1. Profiles: Supabase is the source of truth (admin + users)
-      await this.ensureAdminProfile(client);
-
-      const { data: remoteProfiles, error: pErr } = await client
-        .from('profiles')
-        .select('*')
-        .order('created_at', { ascending: true });
-
-      if (pErr) {
-        console.error('Supabase profiles fetch failed:', dbErrorText(pErr));
-      } else if (remoteProfiles && remoteProfiles.length > 0) {
-        this.profiles = remoteProfiles as UserProfile[];
-
-        // Keep the logged-in session aligned with the database copy
-        if (this.activeUser) {
-          const fresh = this.profiles.find(p => p.id === this.activeUser!.id);
-          if (fresh && fresh.status === 'active') {
-            this.activeUser = fresh;
-          } else if (!fresh && this.activeUser.role === 'user') {
-            this.activeUser = null;
-          } else if (fresh && fresh.status !== 'active') {
-            this.activeUser = null;
-          }
-        }
-      }
-
-      // 2. Customers (admin only): Supabase is the source of truth, fetched page by page
-      //    because Supabase returns at most 1000 rows per request.
-      if (loadCustomers) {
-        const all: Customer[] = [];
-        const pageSize = 1000;
-        let failed = false;
-        for (let from = 0; from < 200000; from += pageSize) {
-          const { data: page, error: cErr } = await client
-            .from('customers')
-            .select('*')
-            .order('uploaded_at', { ascending: false })
-            .order('id', { ascending: true })
-            .range(from, from + pageSize - 1);
-          if (cErr) {
-            failed = true;
-            errors.push(`Customers fetch failed: ${dbErrorText(cErr)}`);
-            console.error('Supabase customers fetch failed:', dbErrorText(cErr));
-            break;
-          }
-          all.push(...((page || []) as Customer[]));
-          if (!page || page.length < pageSize) break;
-        }
-        if (!failed) {
-          const nameById = new Map(this.profiles.map(p => [p.id, p.name]));
-          this.customers = all.map(c => ({
-            ...c,
-            allocated_to: c.allocated_to || undefined,
-            allocated_to_name: c.allocated_to ? nameById.get(c.allocated_to) : undefined,
-          }));
-          customersLoaded = all.length;
-        }
-
-        // Upload history (admin)
-        const { data: remoteUploads, error: uErr } = await client
-          .from('upload_history')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(200);
-        if (uErr) {
-          errors.push(`Upload history fetch failed: ${dbErrorText(uErr)}`);
-        } else if (remoteUploads) {
-          const nameById = new Map(this.profiles.map(p => [p.id, p.name]));
-          this.uploadHistory = remoteUploads.map((u: any) => ({
-            ...u,
-            uploaded_by_name: nameById.get(u.uploaded_by) || 'Admin',
-          })) as UploadHistory[];
-        }
-      }
-
-      // 3. Fetch remote pull history
-      const { data: remotePulls, error: hErr } = await client
-        .from('pull_history')
-        .select('*')
-        .order('pulled_at', { ascending: false });
-
-      if (!hErr && remotePulls) {
-        this.mergePullHistory(remotePulls as PullHistory[]);
-      } else if (hErr) {
-        errors.push(`Pull history fetch failed: ${dbErrorText(hErr)}`);
-        console.error('Supabase pull_history fetch failed:', dbErrorText(hErr));
-      }
-
-      // 4. Fetch remote template
-      const { data: remoteTmpl, error: tErr } = await client
-        .from('message_templates')
-        .select('*')
-        .eq('is_default', true)
-        .maybeSingle();
-
-      if (!tErr && remoteTmpl && remoteTmpl.template) {
-        this.templates = [remoteTmpl as MessageTemplate];
-      }
-
-      this.persistAll();
-    } catch (err) {
-      console.warn('Supabase sync skipped/failed:', err);
-      errors.push(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      this.isSyncing = false;
+    const session = loadSession();
+    if (session) {
+      this.activeUser = session.profile;
+      this.profiles = [session.profile];
+      if (session.tzOffsetMinutes !== undefined) this.tzOffsetMinutes = session.tzOffsetMinutes;
     }
-    return { customersLoaded, errors };
-  }
 
-  // Supabase copy wins; keep local-only rows so nothing disappears
-  private mergePullHistory(remote: PullHistory[]) {
-    const remoteList = remote.map(r => ({ ...r, customer_id: r.customer_id || '' }));
-    const remoteIds = new Set(remoteList.map(r => r.id));
-    const localOnly = this.pullHistory.filter(l => !remoteIds.has(l.id));
-    this.pullHistory = [...remoteList, ...localOnly].sort(
-      (a, b) => new Date(b.pulled_at).getTime() - new Date(a.pulled_at).getTime()
-    );
-  }
-
-  // Make sure the master admin row exists in Supabase (insert-only, never overwrites edits)
-  private async ensureAdminProfile(client: NonNullable<ReturnType<typeof getSupabaseClient>>) {
-    try {
-      const { error } = await client
-        .from('profiles')
-        .upsert([INITIAL_PROFILES[0]], { onConflict: 'email', ignoreDuplicates: true });
-      if (error) {
-        console.error('Supabase admin profile save failed:', dbErrorText(error));
-      }
-    } catch (err) {
-      console.error('Supabase admin profile save error:', err);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('match-session-expired', () => this.resetState());
     }
+
+    // Fresh data from the server (also validates the session); guests only need the template
+    if (session) void this.syncWithSupabase(session.role === 'admin');
+    else void this.loadPublicTemplate();
   }
 
-  private persistAll() {
-    try {
-      localStorage.setItem(STORAGE_KEYS.PROFILES, JSON.stringify(this.profiles));
-      localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(this.customers));
-      localStorage.setItem(STORAGE_KEYS.PULL_HISTORY, JSON.stringify(this.pullHistory));
-      localStorage.setItem(STORAGE_KEYS.SEND_HISTORY, JSON.stringify(this.sendHistory));
-      localStorage.setItem(STORAGE_KEYS.TEMPLATES, JSON.stringify(this.templates));
-      localStorage.setItem(STORAGE_KEYS.UPLOADS, JSON.stringify(this.uploadHistory));
-      localStorage.setItem(STORAGE_KEYS.AUDIT, JSON.stringify(this.auditLogs));
-      if (this.activeUser) {
-        localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, this.activeUser.id);
-      } else {
-        localStorage.removeItem(STORAGE_KEYS.ACTIVE_USER_ID);
-      }
-    } catch {
-      // storage limit or SSR
-    }
-    this.notify();
-  }
-
+  // ------------------------------------------------------------ plumbing
   public subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -339,287 +79,218 @@ class DataStore {
   }
 
   private notify() {
-    for (const listener of this.listeners) {
+    this.listeners.forEach(l => {
       try {
-        listener();
-      } catch {
-        // ignore
+        l();
+      } catch (err) {
+        console.warn('Listener error:', err);
       }
+    });
+  }
+
+  private persistSend() {
+    try {
+      localStorage.setItem(SEND_HISTORY_KEY, JSON.stringify(this.sendHistory.slice(0, 5000)));
+    } catch {
+      // storage full / unavailable
     }
   }
 
-  // --- AUTH & PROFILES ---
+  private resetState() {
+    this.activeUser = null;
+    this.profiles = [];
+    this.customers = [];
+    this.pullHistory = [];
+    this.uploadHistory = [];
+    this.auditLogs = [];
+    this.notify();
+  }
+
+  private async loadPublicTemplate() {
+    try {
+      const r = await api<{ template: string | null }>('template');
+      if (r.template) {
+        this.template = r.template;
+        this.notify();
+      }
+    } catch {
+      // guests simply use the built-in default
+    }
+  }
+
+  // ------------------------------------------------------------ sync (server -> memory)
+  public syncWithSupabase(
+    _includeCustomers: boolean = false
+  ): Promise<{ customersLoaded: number | null; errors: string[] }> {
+    if (this.syncPromise) return this.syncPromise;
+    this.syncPromise = this.doSync().finally(() => {
+      this.syncPromise = null;
+    });
+    return this.syncPromise;
+  }
+
+  private async doSync(): Promise<{ customersLoaded: number | null; errors: string[] }> {
+    const errors: string[] = [];
+    let customersLoaded: number | null = null;
+    const session = loadSession();
+    if (!session) {
+      await this.loadPublicTemplate();
+      return { customersLoaded, errors };
+    }
+
+    try {
+      const me = await api<any>('me');
+      this.activeUser = me.profile;
+      if (typeof me.tzOffsetMinutes === 'number') this.tzOffsetMinutes = me.tzOffsetMinutes;
+      if (me.template?.template) this.template = me.template.template;
+      saveSession(session.token, me.profile, this.tzOffsetMinutes);
+
+      if (me.profile.role === 'user') {
+        this.profiles = [me.profile];
+        this.pullHistory = asHistory(me.history);
+      } else {
+        const ov = await api<any>('admin-overview');
+        this.profiles = ov.profiles;
+        const names = new Map<string, string>(ov.profiles.map((p: UserProfile) => [p.id, p.name]));
+        this.uploadHistory = (ov.uploads || []).map((u: any) => ({
+          ...u,
+          uploaded_by_name: names.get(u.uploaded_by) || 'Admin',
+        }));
+        this.auditLogs = ov.audits || [];
+        if (ov.template?.template) this.template = ov.template.template;
+
+        try {
+          this.pullHistory = await this.fetchAllPages('pull-history-page', 30, asHistory);
+        } catch (e) {
+          errors.push(`Pull history: ${errMsg(e)}`);
+        }
+        try {
+          customersLoaded = await this.loadCustomers();
+        } catch (e) {
+          errors.push(`Customers: ${errMsg(e)}`);
+        }
+      }
+    } catch (e) {
+      errors.push(errMsg(e));
+    }
+
+    this.notify();
+    return { customersLoaded, errors };
+  }
+
+  private async fetchAllPages<T>(action: string, maxPages: number, map: (rows: any[]) => T[]): Promise<T[]> {
+    const all: T[] = [];
+    for (let page = 0; page < maxPages; page++) {
+      const res = await api<{ rows: any[]; more: boolean }>(action, { offset: page * 1000 });
+      all.push(...map(res.rows));
+      if (!res.more) break;
+    }
+    return all;
+  }
+
+  private async loadCustomers(): Promise<number> {
+    const names = new Map(this.profiles.map(p => [p.id, p.name]));
+    this.customers = await this.fetchAllPages<Customer>('customers-page', 300, rows =>
+      rows.map(c => ({
+        ...c,
+        allocated_to: c.allocated_to || undefined,
+        allocated_to_name: c.allocated_to ? names.get(c.allocated_to) : undefined,
+      }))
+    );
+    return this.customers.length;
+  }
+
+  // ------------------------------------------------------------ session
   public getActiveUser(): UserProfile | null {
     return this.activeUser;
   }
 
-  public setActiveUser(userId: string) {
-    const user = this.profiles.find(p => p.id === userId);
-    if (user) {
-      this.activeUser = user;
-      localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, user.id);
-      this.addAuditLog(user.id, user.name, 'USER_LOGIN', `User session active for ${user.name}`);
-      this.notify();
+  public async loginUser(identifier: string): Promise<{ success: boolean; error?: string; user?: UserProfile }> {
+    try {
+      const r = await api<any>('agent-login', { identifier });
+      saveSession(r.token, r.profile, r.tzOffsetMinutes);
+      if (typeof r.tzOffsetMinutes === 'number') this.tzOffsetMinutes = r.tzOffsetMinutes;
+      this.activeUser = r.profile;
+      this.profiles = [r.profile];
+      this.customers = [];
+      await this.syncWithSupabase();
+      return { success: true, user: this.activeUser || r.profile };
+    } catch (e) {
+      return { success: false, error: errMsg(e) };
     }
   }
 
-  // User Login directly checking Supabase profiles table
-  public async loginUser(identifier: string): Promise<{ success: boolean; error?: string; user?: UserProfile }> {
-    const clean = identifier.trim().toLowerCase();
-    if (!clean) {
-      return { success: false, error: 'Please enter your username or email address.' };
+  public async loginAdmin(password: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      const r = await api<any>('admin-login', { password });
+      saveSession(r.token, r.profile, r.tzOffsetMinutes);
+      if (typeof r.tzOffsetMinutes === 'number') this.tzOffsetMinutes = r.tzOffsetMinutes;
+      this.activeUser = r.profile;
+      this.profiles = [r.profile];
+      this.pullHistory = [];
+      await this.syncWithSupabase(true);
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: errMsg(e) };
     }
-
-    const client = getSupabaseClient();
-    if (client) {
-      // Supabase is configured: it is the only source for agent logins (no local fallback)
-      const safe = clean.replace(/[,()%*\\]/g, '');
-      const { data: rows, error } = await client
-        .from('profiles')
-        .select('*')
-        .or(`email.ilike.${safe},email.ilike.${safe}@*,name.ilike.${safe}`)
-        .limit(20);
-
-      if (error) {
-        console.error('Supabase login lookup failed:', dbErrorText(error));
-        return {
-          success: false,
-          error: `Supabase se connect nahi ho paya: ${dbErrorText(error)}`,
-        };
-      }
-
-      const dbUser = (rows || []).find(
-        (p: UserProfile) =>
-          p.role === 'user' &&
-          (p.email.toLowerCase() === clean ||
-            p.name.toLowerCase() === clean ||
-            p.email.split('@')[0].toLowerCase() === clean)
-      ) as UserProfile | undefined;
-
-      if (!dbUser) {
-        return {
-          success: false,
-          error: 'Agent account not found. Please contact Administrator to create your login.',
-        };
-      }
-
-      if (dbUser.status !== 'active') {
-        return {
-          success: false,
-          error: 'Your account is currently disabled. Please contact Administrator.',
-        };
-      }
-
-      const existingIdx = this.profiles.findIndex(p => p.id === dbUser.id);
-      if (existingIdx !== -1) {
-        this.profiles[existingIdx] = dbUser;
-      } else {
-        this.profiles.push(dbUser);
-      }
-
-      this.activeUser = dbUser;
-      localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, dbUser.id);
-      this.addAuditLog(dbUser.id, dbUser.name, 'USER_LOGIN', `Agent ${dbUser.name} logged in via Supabase`);
-      this.persistAll();
-      return { success: true, user: dbUser };
-    }
-
-    // Fallback to local profile check
-    const localUser = this.profiles.find(
-      p =>
-        p.role === 'user' &&
-        (p.email.toLowerCase() === clean ||
-          p.name.toLowerCase() === clean ||
-          p.email.split('@')[0].toLowerCase() === clean)
-    );
-
-    if (!localUser) {
-      return {
-        success: false,
-        error: 'Agent account not found. Please contact Administrator to create your login.',
-      };
-    }
-
-    if (localUser.status !== 'active') {
-      return {
-        success: false,
-        error: 'Your account is currently disabled. Please contact Administrator.',
-      };
-    }
-
-    this.activeUser = localUser;
-    localStorage.setItem(STORAGE_KEYS.ACTIVE_USER_ID, localUser.id);
-    this.addAuditLog(localUser.id, localUser.name, 'USER_LOGIN', `Agent ${localUser.name} logged in`);
-    this.persistAll();
-    return { success: true, user: localUser };
   }
 
   public logout() {
-    if (this.activeUser) {
-      this.addAuditLog(
-        this.activeUser.id,
-        this.activeUser.name,
-        'USER_LOGOUT',
-        `User ${this.activeUser.name} logged out`
-      );
-    }
-    this.activeUser = null;
-    localStorage.removeItem(STORAGE_KEYS.ACTIVE_USER_ID);
-    this.persistAll();
+    clearSession();
+    this.resetState();
   }
 
+  // ------------------------------------------------------------ users (admin)
   public getProfiles(): UserProfile[] {
     return [...this.profiles];
   }
 
-  // Delete User with Supabase deletion
-  public async deleteProfile(userId: string): Promise<{ success: boolean; error?: string }> {
-    const user = this.profiles.find(p => p.id === userId);
-    if (!user) {
-      return { success: false, error: 'User not found.' };
-    }
-    if (user.role === 'admin') {
-      return { success: false, error: 'Cannot delete primary administrator profile.' };
-    }
-
-    const client = getSupabaseClient();
-    if (client) {
-      const { data: deleted, error } = await client
-        .from('profiles')
-        .delete()
-        .eq('id', userId)
-        .select();
-      if (error) {
-        return { success: false, error: `Supabase delete failed: ${dbErrorText(error)}` };
-      }
-      if (!deleted || deleted.length === 0) {
-        return {
-          success: false,
-          error: 'Supabase ne koi row delete nahi ki (RLS policy ya id mismatch check karein).',
-        };
-      }
-    }
-
-    this.profiles = this.profiles.filter(p => p.id !== userId);
-    if (this.activeUser?.id === userId) {
-      this.activeUser = null;
-      localStorage.removeItem(STORAGE_KEYS.ACTIVE_USER_ID);
-    }
-
-    this.addAuditLog(
-      'admin',
-      'Administrator',
-      'DELETE_USER',
-      `Deleted user account ${user.name} (${user.email})`
-    );
-    this.persistAll();
-    return { success: true };
-  }
-
-  // Create User: saved in Supabase when configured (no silent local-only fallback)
   public async createProfile(
     data: Omit<UserProfile, 'id' | 'created_at' | 'updated_at'>
   ): Promise<{ success: boolean; error?: string; profile?: UserProfile }> {
-    const email = data.email.trim();
-    const name = data.name.trim();
-
-    if (this.profiles.some(p => p.email.toLowerCase() === email.toLowerCase())) {
-      return { success: false, error: `User with email ${email} already exists.` };
+    try {
+      const r = await api<{ profile: UserProfile }>('create-profile', data as any);
+      this.profiles.push(r.profile);
+      this.notify();
+      return { success: true, profile: r.profile };
+    } catch (e) {
+      return { success: false, error: errMsg(e) };
     }
-
-    const newProfile: UserProfile = {
-      ...data,
-      name,
-      email,
-      id: newUuid(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    const client = getSupabaseClient();
-    if (client) {
-      const { data: inserted, error } = await client
-        .from('profiles')
-        .insert([newProfile])
-        .select()
-        .single();
-
-      if (error || !inserted) {
-        console.error('Supabase insert profile failed:', dbErrorText(error));
-        return { success: false, error: `Supabase save failed: ${dbErrorText(error)}` };
-      }
-
-      this.profiles.push(inserted as UserProfile);
-      this.addAuditLog(
-        this.activeUser?.id || ADMIN_PROFILE_ID,
-        this.activeUser?.name || 'Admin',
-        'CREATE_USER',
-        `Created user ${inserted.name} (${inserted.email}) in Supabase`
-      );
-      this.persistAll();
-      return { success: true, profile: inserted as UserProfile };
-    }
-
-    // Supabase not configured: built-in local mode
-    this.profiles.push(newProfile);
-    this.addAuditLog(
-      this.activeUser?.id || ADMIN_PROFILE_ID,
-      this.activeUser?.name || 'Admin',
-      'CREATE_USER',
-      `Created user ${newProfile.name} (${newProfile.email})`
-    );
-    this.persistAll();
-    return { success: true, profile: newProfile };
   }
 
-  // Update User with Supabase update
   public async updateProfile(
     id: string,
     updates: Partial<UserProfile>
   ): Promise<{ success: boolean; error?: string; profile?: UserProfile }> {
-    const idx = this.profiles.findIndex(p => p.id === id);
-    if (idx === -1) return { success: false, error: 'User not found.' };
-
-    const updatedAt = new Date().toISOString();
-    const updated = {
-      ...this.profiles[idx],
-      ...updates,
-      updated_at: updatedAt,
-    };
-
-    const client = getSupabaseClient();
-    if (client) {
-      const { data: rows, error } = await client
-        .from('profiles')
-        .update({ ...updates, updated_at: updatedAt })
-        .eq('id', id)
-        .select();
-      if (error) {
-        return { success: false, error: `Supabase update failed: ${dbErrorText(error)}` };
-      }
-      if (!rows || rows.length === 0) {
-        return {
-          success: false,
-          error: 'Supabase ne koi row update nahi ki (RLS policy ya id mismatch check karein).',
-        };
-      }
+    try {
+      const r = await api<{ profile: UserProfile }>('update-profile', { id, ...updates });
+      const idx = this.profiles.findIndex(p => p.id === id);
+      if (idx !== -1) this.profiles[idx] = r.profile;
+      this.notify();
+      return { success: true, profile: r.profile };
+    } catch (e) {
+      return { success: false, error: errMsg(e) };
     }
-
-    this.profiles[idx] = updated;
-    if (this.activeUser?.id === id) {
-      this.activeUser = updated;
-    }
-    this.addAuditLog(
-      this.activeUser?.id || ADMIN_PROFILE_ID,
-      this.activeUser?.name || 'Admin',
-      'UPDATE_USER',
-      `Updated user ${updated.name} limits or status`
-    );
-    this.persistAll();
-    return { success: true, profile: updated };
   }
 
-  // --- QUOTA & USER PULL STATS ---
+  public async deleteProfile(userId: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      await api('delete-profile', { id: userId });
+      this.profiles = this.profiles.filter(p => p.id !== userId);
+      this.pullHistory = this.pullHistory.filter(h => h.user_id !== userId);
+      this.notify();
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: errMsg(e) };
+    }
+  }
+
+  // ------------------------------------------------------------ pull quota / stats
+  private startOfTodayMs(): number {
+    const off = this.tzOffsetMinutes * 60000;
+    return Math.floor((Date.now() + off) / 86400000) * 86400000 - off;
+  }
+
   public getUserPullStats(userId: string): {
     pulledToday: number;
     remainingQuota: number;
@@ -627,274 +298,66 @@ class DataStore {
     perPullLimit: number;
     totalPulled: number;
   } {
-    const user = this.profiles.find(p => p.id === userId);
+    const user = this.profiles.find(p => p.id === userId) || (this.activeUser?.id === userId ? this.activeUser : null);
     const dailyLimit = user?.daily_pull_limit ?? 100;
     const perPullLimit = user?.per_pull_limit ?? 20;
-
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-
-    const userPulls = this.pullHistory.filter(p => p.user_id === userId);
-    const totalPulled = userPulls.length;
-
-    const pulledToday = userPulls.filter(p => {
-      const pDate = new Date(p.pulled_at);
-      return pDate >= startOfToday;
-    }).length;
-
-    const remainingQuota = Math.max(0, dailyLimit - pulledToday);
-
+    const start = this.startOfTodayMs();
+    const mine = this.pullHistory.filter(p => p.user_id === userId);
+    const pulledToday = mine.filter(p => new Date(p.pulled_at).getTime() >= start).length;
     return {
       pulledToday,
-      remainingQuota,
+      remainingQuota: Math.max(0, dailyLimit - pulledToday),
       dailyLimit,
       perPullLimit,
-      totalPulled,
+      totalPulled: mine.length,
     };
   }
 
-  // --- ATOMIC ALLOCATION (DATABASE LEVEL CONCURRENCY PROTECTION) ---
+  // ------------------------------------------------------------ pull (atomic, in the database)
   public async allocateCustomers(
     userId: string,
     requestedCount: number = 1,
     source: string = 'MATCHING_SEND'
   ): Promise<AllocationResult> {
-    const client = getSupabaseClient();
-
-    // 1. Supabase configured: allocation happens ONLY in the database (atomic, no stale local data)
-    if (client) {
-      return this.allocateViaSupabase(client, userId, requestedCount, source);
-    }
-
-    // 2. Local mode (Supabase not configured): built-in allocation
-    while (this.allocationLock) {
-      await new Promise(res => setTimeout(res, 20));
-    }
-
-    this.allocationLock = true;
     try {
+      const r = await api<{ customers: any[]; history: any[] }>('pull', { count: requestedCount, source });
       const user = this.profiles.find(p => p.id === userId);
-      if (!user) {
-        return { success: false, customers: [], error: 'User profile not found.' };
-      }
 
-      if (user.status !== 'active') {
-        return {
-          success: false,
-          customers: [],
-          error: 'Your account is disabled. Please contact the administrator.',
-        };
-      }
-
-      const { pulledToday, remainingQuota, perPullLimit } = this.getUserPullStats(userId);
-
-      if (remainingQuota <= 0) {
-        return {
-          success: false,
-          customers: [],
-          error: `Your daily customer limit (${user.daily_pull_limit}) has been reached.`,
-        };
-      }
-
-      if (requestedCount > perPullLimit) {
-        return {
-          success: false,
-          customers: [],
-          error: `You can pull maximum ${perPullLimit} customers at a time.`,
-        };
-      }
-
-      const actualLimit = Math.min(requestedCount, remainingQuota);
-
-      // Lock available customers
-      const availableIndexes: number[] = [];
-      for (let i = 0; i < this.customers.length; i++) {
-        if (this.customers[i].status === 'AVAILABLE') {
-          availableIndexes.push(i);
-          if (availableIndexes.length >= actualLimit) break;
-        }
-      }
-
-      if (availableIndexes.length === 0) {
-        return {
-          success: false,
-          customers: [],
-          error: 'No new customer is currently available in the system. Please request Admin to upload fresh data.',
-        };
-      }
-
-      const allocatedList: Customer[] = [];
-      const newHistoryItems: PullHistory[] = [];
-      const now = new Date().toISOString();
-      const lotId = newUuid(); // one id for every number pulled together (a "bunch")
-
-      for (const idx of availableIndexes) {
-        const cust = this.customers[idx];
-        cust.status = 'PULLED';
-        cust.allocated_to = user.id;
-        cust.allocated_to_name = user.name;
-        cust.allocated_at = now;
-        cust.pulled_at = now;
-        cust.updated_at = now;
-
-        allocatedList.push({ ...cust });
-
-        const pullHistoryItem: PullHistory = {
-          id: newUuid(),
-          customer_id: cust.id,
-          customer_number: cust.customer_number,
-          customer_name: cust.customer_name,
-          matching_number: cust.matching_number,
-          matching_number_2: cust.matching_number_2,
-          user_id: user.id,
-          user_name: user.name,
-          action: 'PULLED',
-          source,
-          pulled_at: now,
-          metadata: { lot_id: lotId },
-        };
-
-        this.pullHistory.unshift(pullHistoryItem);
-        newHistoryItems.push(pullHistoryItem);
-      }
-
-      // A new pull always becomes the Recent bunch
-      if (newHistoryItems.length > 0) {
-        try {
-          localStorage.removeItem(`vi_recent_lot_${userId}`);
-        } catch {
-          // ignore
-        }
-      }
-
-      this.addAuditLog(
-        user.id,
-        user.name,
-        'CUSTOMER_PULL',
-        `Pulled ${allocatedList.length} customer(s) via ${source}`
+      const fresh = asHistory(r.history);
+      const freshIds = new Set(fresh.map(h => h.id));
+      this.pullHistory = [...fresh, ...this.pullHistory.filter(h => !freshIds.has(h.id))].sort(
+        (a, b) => new Date(b.pulled_at).getTime() - new Date(a.pulled_at).getTime()
       );
 
-      this.persistAll();
-      return {
-        success: true,
-        customers: allocatedList,
-        quotaRemaining: remainingQuota - allocatedList.length,
-      };
-    } finally {
-      this.allocationLock = false;
-    }
-  }
-
-  private async allocateViaSupabase(
-    client: NonNullable<ReturnType<typeof getSupabaseClient>>,
-    userId: string,
-    requestedCount: number,
-    source: string
-  ): Promise<AllocationResult> {
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    const lotId = newUuid();
-
-    const { data, error } = await client.rpc('allocate_customers_v2', {
-      p_user_id: userId,
-      p_requested_count: requestedCount,
-      p_source: source,
-      p_lot_id: lotId,
-      p_day_start: startOfToday.toISOString(),
-    });
-
-    if (error) {
-      const msg = error.message || '';
-      let friendly = `Pull failed: ${dbErrorText(error)}`;
-      if (msg.startsWith('QUOTA_REACHED')) {
-        friendly = `Your daily customer limit (${msg.split(':')[1] || ''}) has been reached.`;
-      } else if (msg.startsWith('PER_PULL_LIMIT')) {
-        friendly = `You can pull maximum ${msg.split(':')[1] || ''} customers at a time.`;
-      } else if (msg.startsWith('USER_DISABLED')) {
-        friendly = 'Your account is disabled. Please contact the administrator.';
-      } else if (msg.startsWith('USER_NOT_FOUND')) {
-        friendly = 'User profile not found in Supabase. Please contact the administrator.';
-      } else if (error.code === 'PGRST202' || /could not find the function/i.test(msg)) {
-        friendly =
-          'Supabase setup pending: supabase-customers-fix.sql ko SQL Editor me run karein (allocate_customers_v2 missing).';
+      try {
+        localStorage.removeItem(`vi_recent_lot_${userId}`);
+      } catch {
+        // ignore
       }
-      return { success: false, customers: [], error: friendly };
+
+      const customers: Customer[] = r.customers.map(c => ({
+        id: c.out_id,
+        customer_number: c.out_customer_number,
+        customer_name: c.out_customer_name || undefined,
+        matching_number: c.out_matching_number,
+        matching_number_2: c.out_matching_number_2 || undefined,
+        status: 'PULLED',
+        allocated_to: userId,
+        allocated_to_name: user?.name,
+        pulled_at: c.out_pulled_at,
+        uploaded_at: c.out_pulled_at,
+        created_at: c.out_pulled_at,
+      }));
+
+      this.notify();
+      return { success: true, customers, quotaRemaining: this.getUserPullStats(userId).remainingQuota };
+    } catch (e) {
+      return { success: false, customers: [], error: errMsg(e) };
     }
-
-    const rows = (data || []) as Array<{
-      out_id: string;
-      out_customer_number: string;
-      out_customer_name: string | null;
-      out_matching_number: string;
-      out_matching_number_2: string | null;
-      out_pulled_at: string;
-    }>;
-
-    if (rows.length === 0) {
-      return {
-        success: false,
-        customers: [],
-        error:
-          'No new customer is currently available in the system. Please request Admin to upload fresh data.',
-      };
-    }
-
-    const user = this.profiles.find(p => p.id === userId);
-    const customers: Customer[] = rows.map(r => ({
-      id: r.out_id,
-      customer_number: r.out_customer_number,
-      customer_name: r.out_customer_name || undefined,
-      matching_number: r.out_matching_number,
-      matching_number_2: r.out_matching_number_2 || undefined,
-      status: 'PULLED',
-      allocated_to: userId,
-      allocated_to_name: user?.name,
-      pulled_at: r.out_pulled_at,
-      uploaded_at: r.out_pulled_at,
-      created_at: r.out_pulled_at,
-    }));
-
-    // Load this user's history (written by the database function) into the app
-    let warning: string | undefined;
-    const { data: hist, error: hErr } = await client
-      .from('pull_history')
-      .select('*')
-      .eq('user_id', userId)
-      .order('pulled_at', { ascending: false })
-      .limit(500);
-    if (hErr) {
-      warning = `Pull ho gaya, lekin history refresh nahi hui: ${dbErrorText(hErr)}`;
-    } else if (hist) {
-      this.mergePullHistory(hist as PullHistory[]);
-    }
-
-    try {
-      localStorage.removeItem(`vi_recent_lot_${userId}`);
-    } catch {
-      // ignore
-    }
-
-    this.addAuditLog(userId, user?.name || 'Agent', 'CUSTOMER_PULL', `Pulled ${customers.length} customer(s) via ${source}`);
-    this.persistAll();
-
-    return {
-      success: true,
-      customers,
-      warning,
-      quotaRemaining: this.getUserPullStats(userId).remainingQuota,
-    };
   }
 
-  // --- RECENT USER DATA ---
-  public getUserRecentPulled(userId: string, limit: number = 30): Customer[] {
-    return this.customers
-      .filter(c => c.allocated_to === userId && c.status === 'PULLED')
-      .sort((a, b) => new Date(b.pulled_at || 0).getTime() - new Date(a.pulled_at || 0).getTime())
-      .slice(0, limit);
-  }
-
-  // Pull history grouped into bunches (lots): numbers pulled together in one pull.
-  // Newest lot first, limited to the latest `maxLots` bunches.
+  // ------------------------------------------------------------ pull lots (bunches)
+  // Pull history grouped into bunches: numbers pulled together in one pull. Newest first.
   public getUserPullLots(userId: string, maxLots: number = 5): PullLot[] {
     const mine = this.pullHistory
       .filter(h => h.user_id === userId)
@@ -916,8 +379,7 @@ class DataStore {
     return lots.slice(0, maxLots);
   }
 
-  // "Recent Pulled Data" bunch: the latest pulled bunch, unless the user chose an older
-  // bunch from History ("Send to Matching Recent"). A new pull resets it to the latest.
+  // "Recent Pulled Data": the latest bunch, unless the user chose an older one from History.
   public getRecentLot(userId: string): PullLot | null {
     const lots = this.getUserPullLots(userId, 1000);
     if (lots.length === 0) return null;
@@ -940,7 +402,6 @@ class DataStore {
     this.notify();
   }
 
-  // Numbers this user has already sent (WhatsApp / RCS) - used to hide the send buttons
   public getSentNumbers(userId: string): Set<string> {
     const nums = new Set<string>();
     for (const rec of this.sendHistory) {
@@ -949,18 +410,12 @@ class DataStore {
     return nums;
   }
 
-  // --- CUSTOMER DATA MANAGEMENT ---
+  // ------------------------------------------------------------ customers (admin)
   public getAllCustomers(): Customer[] {
     return [...this.customers];
   }
 
-  public getCustomerCounts(): {
-    total: number;
-    available: number;
-    pulled: number;
-    used: number;
-    disabled: number;
-  } {
+  public getCustomerCounts(): { total: number; available: number; pulled: number; used: number; disabled: number } {
     let available = 0,
       pulled = 0,
       used = 0,
@@ -971,120 +426,61 @@ class DataStore {
       else if (c.status === 'USED') used++;
       else if (c.status === 'DISABLED') disabled++;
     }
-    return {
-      total: this.customers.length,
-      available,
-      pulled,
-      used,
-      disabled,
-    };
+    return { total: this.customers.length, available, pulled, used, disabled };
   }
 
   public async addCustomer(
     data: Omit<Customer, 'id' | 'status' | 'created_at' | 'uploaded_at'>
   ): Promise<{ success: boolean; error?: string; customer?: Customer }> {
-    const cleanNum = data.customer_number.replace(/\D/g, '');
-    if (cleanNum.length !== 10) {
-      return { success: false, error: 'Customer number must be exactly 10 digits.' };
+    try {
+      const r = await api<{ customer: Customer }>('add-customer', data as any);
+      this.customers.unshift(r.customer);
+      this.notify();
+      return { success: true, customer: r.customer };
+    } catch (e) {
+      return { success: false, error: errMsg(e) };
     }
-    const cleanMatch = data.matching_number.replace(/\D/g, '');
-    if (cleanMatch.length !== 10) {
-      return { success: false, error: 'Matching number must be exactly 10 digits.' };
-    }
-
-    if (this.customers.some(c => c.customer_number === cleanNum)) {
-      return { success: false, error: `Customer number ${cleanNum} already exists in database.` };
-    }
-
-    const newCust: Customer = {
-      id: newUuid(),
-      customer_number: cleanNum,
-      customer_name: data.customer_name?.trim() || undefined,
-      matching_number: cleanMatch,
-      matching_number_2: data.matching_number_2
-        ? data.matching_number_2.replace(/\D/g, '')
-        : undefined,
-      status: 'AVAILABLE',
-      uploaded_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-    };
-
-    const client = getSupabaseClient();
-    if (client) {
-      const { error } = await client.from('customers').insert([toCustomerRow(newCust)]);
-      if (error) {
-        return {
-          success: false,
-          error:
-            error.code === '23505'
-              ? `Customer number ${cleanNum} already exists in database.`
-              : `Supabase save failed: ${dbErrorText(error)}`,
-        };
-      }
-    }
-
-    this.customers.unshift(newCust);
-    this.addAuditLog(
-      this.activeUser?.id || 'admin',
-      this.activeUser?.name || 'Admin',
-      'ADD_CUSTOMER',
-      `Added customer ${cleanNum}`
-    );
-    this.persistAll();
-    return { success: true, customer: newCust };
   }
 
   public async updateCustomer(id: string, updates: Partial<Customer>): Promise<boolean> {
-    const idx = this.customers.findIndex(c => c.id === id);
-    if (idx === -1) return false;
-
-    const client = getSupabaseClient();
-    if (client) {
-      const { allocated_to_name: _n, ...dbUpdates } = updates as Partial<Customer>;
-      const { data: rows, error } = await client
-        .from('customers')
-        .update({ ...dbUpdates, updated_at: new Date().toISOString() })
-        .eq('id', id)
-        .select('id');
-      if (error || !rows || rows.length === 0) {
-        console.error('Supabase update customer failed:', error ? dbErrorText(error) : 'no row updated');
-        return false;
+    try {
+      const r = await api<{ customer: Customer }>('update-customer', {
+        id,
+        customer_name: updates.customer_name,
+        matching_number: updates.matching_number,
+        matching_number_2: updates.matching_number_2 ?? '',
+        status: updates.status,
+      });
+      const idx = this.customers.findIndex(c => c.id === id);
+      if (idx !== -1) {
+        const names = new Map(this.profiles.map(p => [p.id, p.name]));
+        this.customers[idx] = {
+          ...r.customer,
+          allocated_to: r.customer.allocated_to || undefined,
+          allocated_to_name: r.customer.allocated_to ? names.get(r.customer.allocated_to) : undefined,
+        };
       }
+      this.notify();
+      return true;
+    } catch (e) {
+      console.error('Update customer failed:', errMsg(e));
+      return false;
     }
-
-    this.customers[idx] = {
-      ...this.customers[idx],
-      ...updates,
-      updated_at: new Date().toISOString(),
-    };
-    this.persistAll();
-    return true;
   }
 
   public async deleteCustomer(id: string): Promise<boolean> {
-    const idx = this.customers.findIndex(c => c.id === id);
-    if (idx === -1) return false;
-    const client = getSupabaseClient();
-    if (client) {
-      const { data: rows, error } = await client.from('customers').delete().eq('id', id).select('id');
-      if (error || !rows || rows.length === 0) {
-        console.error('Supabase delete customer failed:', error ? dbErrorText(error) : 'no row deleted');
-        return false;
-      }
+    try {
+      await api('delete-customer', { id });
+      this.customers = this.customers.filter(c => c.id !== id);
+      this.notify();
+      return true;
+    } catch (e) {
+      console.error('Delete customer failed:', errMsg(e));
+      return false;
     }
-    const removed = this.customers.splice(idx, 1)[0];
-
-    this.addAuditLog(
-      this.activeUser?.id || 'admin',
-      this.activeUser?.name || 'Admin',
-      'DELETE_CUSTOMER',
-      `Deleted customer ${removed.customer_number} (${removed.customer_name || 'No Name'})`
-    );
-    this.persistAll();
-    return true;
   }
 
-  // --- EXCEL / CSV BULK IMPORT: saved in Supabase (source of truth) ---
+  // Excel / CSV upload: sent to the server in chunks and saved in Supabase
   public async importBulkData(
     filename: string,
     rows: Array<{
@@ -1103,172 +499,85 @@ class DataStore {
     error?: string;
     addedCustomers: Customer[];
   }> {
+    const base = new Date().toISOString();
+    const chunkSize = 1000;
+    let inserted = 0;
     let duplicate = 0;
     let invalid = 0;
-    const seen = new Set<string>(this.customers.map(c => c.customer_number));
-    const candidates: Customer[] = [];
-    const now = new Date().toISOString();
+    let processed = 0;
+    let error: string | undefined;
 
-    for (const r of rows) {
-      const cNum = (r.customer_number || '').toString().replace(/\D/g, '');
-      const m1 = (r.matching_number || '').toString().replace(/\D/g, '');
-      const m2 = r.matching_number_2 ? r.matching_number_2.toString().replace(/\D/g, '') : '';
-      const name = (r.customer_name || '').toString().trim();
+    for (let i = 0; i < rows.length; i += chunkSize) {
+      const slice = rows.slice(i, i + chunkSize);
+      try {
+        const r = await api<{ inserted: number; duplicate: number; invalid: number }>('import-chunk', {
+          rows: slice,
+          base,
+          startIndex: i,
+        });
+        inserted += r.inserted;
+        duplicate += r.duplicate;
+        invalid += r.invalid;
+        processed += slice.length;
+      } catch (e) {
+        error = `Upload failed: ${errMsg(e)}`;
+        break;
+      }
+    }
 
-      if (cNum.length !== 10 || m1.length !== 10) {
-        invalid++;
-        continue;
-      }
-      if (seen.has(cNum)) {
-        duplicate++;
-        continue;
-      }
-      seen.add(cNum);
-      candidates.push({
-        id: newUuid(),
-        customer_number: cNum,
-        customer_name: name || undefined,
-        matching_number: m1,
-        matching_number_2: m2 && m2.length === 10 ? m2 : undefined,
-        status: 'AVAILABLE',
-        uploaded_at: now,
-        created_at: now,
+    const valid = rows.length - invalid;
+    try {
+      await api('record-upload', {
+        filename,
+        total: rows.length,
+        valid,
+        duplicate,
+        invalid,
+        newRows: inserted,
       });
+    } catch (e) {
+      console.error('Upload history save failed:', errMsg(e));
     }
 
-    let newlyAdded: Customer[] = candidates;
-    let failed = 0;
-    let uploadError: string | undefined;
+    // Show exactly what is in Supabase now
+    await this.syncWithSupabase(true);
 
-    const client = getSupabaseClient();
-    if (client && candidates.length > 0) {
-      // Insert in chunks; rows already in the database (same customer_number) are skipped
-      const insertedNums = new Set<string>();
-      let processed = 0;
-      const chunkSize = 500;
-      for (let i = 0; i < candidates.length; i += chunkSize) {
-        const chunk = candidates.slice(i, i + chunkSize);
-        const { data, error } = await client
-          .from('customers')
-          .upsert(chunk.map(toCustomerRow), { onConflict: 'customer_number', ignoreDuplicates: true })
-          .select('customer_number');
-        if (error) {
-          uploadError = `Supabase upload failed: ${dbErrorText(error)}`;
-          console.error(uploadError);
-          break;
-        }
-        (data || []).forEach((d: { customer_number: string }) => insertedNums.add(d.customer_number));
-        processed += chunk.length;
-      }
-      newlyAdded = candidates.filter(c => insertedNums.has(c.customer_number));
-      duplicate += Math.max(0, processed - newlyAdded.length);
-      failed = candidates.length - processed;
-    }
-
-    if (newlyAdded.length > 0) {
-      this.customers = [...newlyAdded, ...this.customers];
-    }
-
-    const uploadRecord: UploadHistory = {
-      id: newUuid(),
-      uploaded_by: this.activeUser?.id || ADMIN_PROFILE_ID,
-      uploaded_by_name: this.activeUser?.name || 'Admin',
-      filename,
-      total_rows: rows.length,
-      valid_rows: rows.length - invalid,
-      duplicate_rows: duplicate,
-      invalid_rows: invalid,
-      new_rows: newlyAdded.length,
-      created_at: now,
-    };
-
-    this.uploadHistory.unshift(uploadRecord);
-
-    if (client) {
-      const { uploaded_by_name: _n, ...dbRecord } = uploadRecord;
-      const { error: uhErr } = await client.from('upload_history').insert([
-        { ...dbRecord, uploaded_by: UUID_RE.test(dbRecord.uploaded_by) ? dbRecord.uploaded_by : null },
-      ]);
-      if (uhErr) console.error('Supabase upload_history save failed:', dbErrorText(uhErr));
-    }
-
-    this.addAuditLog(
-      this.activeUser?.id || 'admin',
-      this.activeUser?.name || 'Admin',
-      'EXCEL_UPLOAD',
-      `Imported ${newlyAdded.length} new records from ${filename} (${duplicate} duplicates, ${invalid} invalid)`
-    );
-
-    this.persistAll();
     return {
       total: rows.length,
-      valid: rows.length - invalid,
+      valid,
       duplicate,
       invalid,
-      newRows: newlyAdded.length,
-      failed,
-      error: uploadError,
-      addedCustomers: newlyAdded,
+      newRows: inserted,
+      failed: rows.length - processed,
+      error,
+      addedCustomers: [],
     };
   }
 
-  // --- MESSAGE TEMPLATES ---
+  // ------------------------------------------------------------ template
   public getActiveTemplate(): string {
-    const def = this.templates.find(t => t.is_default);
-    return def ? def.template : DEF_FMT;
+    return this.template || DEF_FMT;
   }
 
   public async saveTemplate(newTemplate: string): Promise<boolean> {
-    const def = this.templates.find(t => t.is_default);
-    if (def) {
-      def.template = newTemplate;
-      def.updated_at = new Date().toISOString();
-    } else {
-      this.templates.push({
-        id: `tmpl-${Date.now()}`,
-        name: 'Default Template',
-        template: newTemplate,
-        is_default: true,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      });
+    try {
+      await api('save-template', { template: newTemplate });
+      this.template = newTemplate;
+      this.notify();
+      return true;
+    } catch (e) {
+      console.error('Template save failed:', errMsg(e));
+      return false;
     }
-
-    const client = getSupabaseClient();
-    if (client) {
-      try {
-        await client.from('message_templates').upsert({
-          name: 'Default Template',
-          template: newTemplate,
-          is_default: true,
-          updated_at: new Date().toISOString(),
-        });
-      } catch {
-        // ignore
-      }
-    }
-
-    this.addAuditLog(
-      this.activeUser?.id || 'admin',
-      this.activeUser?.name || 'Admin',
-      'UPDATE_TEMPLATE',
-      'Updated outreach message template'
-    );
-    this.persistAll();
-    return true;
   }
 
   public resetTemplate(): string {
-    const def = this.templates.find(t => t.is_default);
-    if (def) {
-      def.template = DEF_FMT;
-      def.updated_at = new Date().toISOString();
-    }
-    this.persistAll();
+    this.template = DEF_FMT;
+    this.notify();
     return DEF_FMT;
   }
 
-  // --- SEND HISTORY ---
+  // ------------------------------------------------------------ send history (this browser only)
   public recordSend(data: {
     customer_number: string;
     customer_id?: string;
@@ -1276,8 +585,8 @@ class DataStore {
     message: string;
   }) {
     const user = this.activeUser;
-    const sendRecord: SendHistory = {
-      id: `snd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    const rec: SendHistory = {
+      id: newUuid(),
       customer_id: data.customer_id,
       customer_number: data.customer_number,
       user_id: user?.id || 'guest',
@@ -1287,18 +596,9 @@ class DataStore {
       sent_at: new Date().toISOString(),
       status: 'OPENED',
     };
-    this.sendHistory.unshift(sendRecord);
-
-    const client = getSupabaseClient();
-    if (client) {
-      try {
-        client.from('send_history').insert([sendRecord]).then();
-      } catch {
-        // ignore
-      }
-    }
-
-    this.persistAll();
+    this.sendHistory.unshift(rec);
+    this.persistSend();
+    this.notify();
   }
 
   public getSendHistory(): SendHistory[] {
@@ -1315,39 +615,6 @@ class DataStore {
 
   public getAuditLogs(): AuditLog[] {
     return [...this.auditLogs];
-  }
-
-  private addAuditLog(userId: string, userName: string, action: string, details: string) {
-    this.auditLogs.unshift({
-      id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-      user_id: userId,
-      user_name: userName,
-      action,
-      details,
-      created_at: new Date().toISOString(),
-    });
-    if (this.auditLogs.length > 500) {
-      this.auditLogs.pop();
-    }
-  }
-
-  public resetToCleanProduction() {
-    this.profiles = [...INITIAL_PROFILES];
-    this.customers = [];
-    this.pullHistory = [];
-    this.sendHistory = [];
-    this.templates = [
-      {
-        id: 'tmpl-default',
-        name: 'Vi Premium Default Template',
-        template: DEF_FMT,
-        is_default: true,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-    ];
-    this.activeUser = null;
-    this.persistAll();
   }
 }
 
